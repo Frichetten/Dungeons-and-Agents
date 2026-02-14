@@ -213,7 +213,7 @@ For every player turn, follow this exact sequence:
 6. Resolve mechanically before narration, then persist via mutation commands.
 7. Apply all state changes via tool commands.
 8. Commit turn with `dmctl turn commit`.
-9. Present player-facing output with a state diff.
+9. Present concise player-facing output.
 10. End with "What do you do?"
 
 If any mutation command fails:
@@ -232,13 +232,10 @@ Use this structure:
 - Mechanics
 - Rolls
 - Outcome
-- State Diff
-- Open Threads
 - Prompt
 
 Additionally, every player-facing payload must comply with UI Contract v1:
 
-- `ui_contract_version` must be `1.0`.
 - `template_id` must be one of:
   - `scene_turn`
   - `dialogue_turn`
@@ -250,14 +247,7 @@ Additionally, every player-facing payload must comply with UI Contract v1:
 - Section order must follow the template registry.
 - Actionable templates must include exactly 4 numbered choices plus freeform fallback.
 - Actionable templates must end with exact prompt: `What do you do?`
-
-State Diff must include:
-- Time advanced
-- Location change
-- HP/resources changed
-- Inventory/currency changed
-- Relationship/reputation changed
-- Quest/rumor/clock updates
+- Do not show envelope metadata fields (`ui_contract_version`, `template_id`) in player-facing prose.
 
 ==================================================
 SECTION 9: COMBAT PROTOCOL

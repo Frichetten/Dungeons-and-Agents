@@ -32,9 +32,7 @@ Version is fixed at `1.0`.
     {"id":"scene","label":"Scene","content":"..."},
     {"id":"mechanics","label":"Mechanics","content":"..."},
     {"id":"rolls","label":"Rolls","content":"..."},
-    {"id":"outcome","label":"Outcome","content":"..."},
-    {"id":"state_diff","label":"State Diff","content":"..."},
-    {"id":"open_threads","label":"Open Threads","content":"..."}
+    {"id":"outcome","label":"Outcome","content":"..."}
   ],
   "choices": [
     {"id":"1","label":"Strike the raider","intent":"Action","risk":"Medium"},
@@ -50,16 +48,16 @@ Version is fixed at `1.0`.
 ## Template Registry
 
 - `scene_turn`
-  - Sections: `scene`, `mechanics`, `outcome`, `state_diff`, `open_threads`
+  - Sections: `scene`, `mechanics`, `outcome`
 - `dialogue_turn`
-  - Sections: `scene`, `mechanics`, `outcome`, `state_diff`, `open_threads`
+  - Sections: `scene`, `mechanics`, `outcome`
   - Choice tone tags required: `firm`, `curious`, `deceptive`, `empathetic`
 - `combat_turn`
-  - Sections: `scene`, `mechanics`, `rolls`, `outcome`, `state_diff`, `open_threads`
+  - Sections: `scene`, `mechanics`, `rolls`, `outcome`
 - `exploration_turn`
-  - Sections: `scene`, `mechanics`, `outcome`, `state_diff`, `open_threads`
+  - Sections: `scene`, `mechanics`, `outcome`
 - `skill_check_turn`
-  - Sections: `scene`, `mechanics`, `rolls`, `outcome`, `state_diff`, `open_threads`
+  - Sections: `scene`, `mechanics`, `rolls`, `outcome`
 - `ooc_panel`
   - Sections: `overview`, `resources`, `objectives`, `world`
   - Non-actionable: no choices, no prompt
@@ -80,6 +78,7 @@ Rendering rules:
 - Actionable templates always include:
   - `freeform_hint`: `Or describe another action.`
   - `prompt`: `What do you do?`
+- Player-facing markdown should not print envelope metadata lines (`ui_contract_version`, `template_id`).
 
 ## Validation Rules
 
@@ -103,7 +102,5 @@ Current runtime integration points in `tools/dmctl`:
 
 Each integrated response includes:
 
-- `ui_contract_version`
-- `template_id`
 - `ui` (validated canonical envelope)
 - `ui_markdown` (numbered chat rendering)

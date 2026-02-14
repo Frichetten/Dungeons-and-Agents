@@ -31,7 +31,7 @@ Use canonical terms exactly:
 - Hide backend noise (raw internals, debug IDs, irrelevant fields).
 - For high-pressure states (combat/hazards), keep flavor to one sentence max before mechanics.
 
-## State Diff Notation
+## Delta Notation
 
 Use consistent delta style:
 
