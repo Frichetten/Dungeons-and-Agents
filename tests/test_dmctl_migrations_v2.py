@@ -15,7 +15,7 @@ CAMPAIGNS_ROOT = ROOT / ".dm" / "campaigns"
 class TestDMCTLMigrationsV2(unittest.TestCase):
     def test_migration_files_monotonic(self):
         files = sorted(path.name for path in DM_MIGRATIONS.glob("*.sql"))
-        self.assertEqual(files, ["001_init.sql", "002_reliability_core.sql"])
+        self.assertEqual(files, ["001_init.sql", "002_reliability_core.sql", "003_engagement_rewards.sql"])
 
     def test_schema_contains_v2_tables(self):
         sql = SCHEMA_SQL.read_text(encoding="utf-8")
@@ -24,10 +24,14 @@ class TestDMCTLMigrationsV2(unittest.TestCase):
             "CREATE TABLE IF NOT EXISTS turn_diffs",
             "CREATE TABLE IF NOT EXISTS agenda_rules",
             "CREATE TABLE IF NOT EXISTS knowledge_facts",
+            "CREATE TABLE IF NOT EXISTS reward_events",
             "CREATE TABLE IF NOT EXISTS rumor_links",
             "stage TEXT NOT NULL DEFAULT 'committed'",
             "checkpoint_checksum",
             "action_used INTEGER NOT NULL DEFAULT 0",
+            "world_day_index INTEGER NOT NULL DEFAULT 0",
+            "xp_total INTEGER NOT NULL DEFAULT 0",
+            "reward_json TEXT NOT NULL DEFAULT '{}'",
         ]:
             self.assertIn(token, sql)
 
@@ -50,6 +54,7 @@ class TestDMCTLMigrationsV2(unittest.TestCase):
             "turn_diffs",
             "agenda_rules",
             "knowledge_facts",
+            "reward_events",
             "rumor_links",
             "combatants",
         }
