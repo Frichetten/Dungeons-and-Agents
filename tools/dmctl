@@ -4294,8 +4294,8 @@ def command_quest_update(args: argparse.Namespace, payload: Dict[str, Any]) -> T
         if obj_id:
             obj_id_str = str(obj_id)
             existing_objective = conn.execute(
-                "SELECT id FROM quest_objectives WHERE id = ? AND quest_id = ?",
-                (obj_id_str, quest_id),
+                "SELECT id, quest_id FROM quest_objectives WHERE id = ?",
+                (obj_id_str,),
             ).fetchone()
 
             if existing_objective is None:
@@ -4314,6 +4314,17 @@ def command_quest_update(args: argparse.Namespace, payload: Dict[str, Any]) -> T
                     ),
                 )
                 continue
+
+            existing_quest_id = str(existing_objective["quest_id"])
+            if existing_quest_id != str(quest_id):
+                raise DMError(
+                    "objective_id_conflict",
+                    {
+                        "objective_id": obj_id_str,
+                        "quest_id": quest_id,
+                        "existing_quest_id": existing_quest_id,
+                    },
+                )
 
             fields: List[str] = []
             params: List[Any] = []
@@ -7497,6 +7508,7 @@ def error_hint(error: str) -> Optional[str]:
         "invalid_quest_status": "Use quest status: open, in_progress, completed, or failed.",
         "invalid_objective_status": "Use objective status: open, complete, or failed.",
         "item_id_name_conflict": "Use the existing item_id for that item name, or choose a unique item_name.",
+        "objective_id_conflict": "Use a unique objective id or update the objective on its original quest.",
     }
     return hints.get(error)
 
@@ -7513,6 +7525,7 @@ def error_message(error: str) -> str:
         "invalid_quest_status": "Quest status value is invalid.",
         "invalid_objective_status": "Quest objective status value is invalid.",
         "item_id_name_conflict": "The provided item_id conflicts with an existing item_name.",
+        "objective_id_conflict": "The objective ID is already assigned to a different quest.",
     }
     return mapping.get(error, error.replace("_", " "))
 

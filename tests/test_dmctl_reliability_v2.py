@@ -333,6 +333,46 @@ class TestDMCTLReliabilityV2(unittest.TestCase):
         self.assertEqual(bad["error"], "invalid_objective_status")
         run_dmctl("turn", "rollback", "--campaign", self.campaign_id, payload={"reason": "invalid objective status"})
 
+    def test_07_quest_update_rejects_objective_id_from_other_quest(self):
+        run_dmctl("turn", "begin", "--campaign", self.campaign_id)
+        run_dmctl(
+            "quest",
+            "add",
+            "--campaign",
+            self.campaign_id,
+            payload={
+                "id": "quest_alpha",
+                "title": "Alpha Quest",
+                "objectives": [{"id": "obj_shared_id", "description": "Alpha objective", "status": "open"}],
+            },
+        )
+        run_dmctl(
+            "quest",
+            "add",
+            "--campaign",
+            self.campaign_id,
+            payload={
+                "id": "quest_beta",
+                "title": "Beta Quest",
+            },
+        )
+        conflict = run_dmctl(
+            "quest",
+            "update",
+            "--campaign",
+            self.campaign_id,
+            payload={
+                "quest_id": "quest_beta",
+                "objective_updates": [{"id": "obj_shared_id", "description": "Wrong quest objective reuse"}],
+            },
+            expect_ok=False,
+        )
+        self.assertEqual(conflict["error"], "objective_id_conflict")
+        self.assertEqual(conflict["details"]["objective_id"], "obj_shared_id")
+        self.assertEqual(conflict["details"]["quest_id"], "quest_beta")
+        self.assertEqual(conflict["details"]["existing_quest_id"], "quest_alpha")
+        run_dmctl("turn", "rollback", "--campaign", self.campaign_id, payload={"reason": "objective id conflict"})
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
