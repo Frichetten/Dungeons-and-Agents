@@ -951,16 +951,21 @@ def build_combat_start_envelope(data: Dict[str, Any]) -> Dict[str, Any]:
     ]
     sections = [
         {
+            "id": "rolls",
+            "label": "Rolls",
+            "content": join_lines(
+                [
+                    "Initiative rolled for each participant and logged.",
+                    f"Turn index {data.get('turn_index', 0)}.",
+                    f"Initiative order established for {len(combatants)} combatants.",
+                ]
+            ),
+        },
+        {
             "id": "scene",
             "label": "Scene",
             "content": f"Encounter {data.get('encounter_id', 'unknown')} begins. Round {data.get('round', 1)}.",
         },
-        {
-            "id": "mechanics",
-            "label": "Mechanics",
-            "content": f"Turn index {data.get('turn_index', 0)}. Initiative order established for {len(combatants)} combatants.",
-        },
-        {"id": "rolls", "label": "Rolls", "content": "Initiative rolled for each participant and logged."},
         {"id": "outcome", "label": "Outcome", "content": join_lines(combatant_lines, fallback="No combatants were created.")},
     ]
     return build_ui_envelope("combat_turn", f"Round {data.get('round', 1)} - Combat Starts", sections=sections)
@@ -972,15 +977,16 @@ def build_combat_turn_envelope(data: Dict[str, Any]) -> Dict[str, Any]:
 
     sections = [
         {
-            "id": "scene",
-            "label": "Scene",
-            "content": f"Round {data.get('round', '?')} in encounter {data.get('encounter_id', 'unknown')}.",
+            "id": "rolls",
+            "label": "Rolls",
+            "content": "Resolved using command payloads and persisted combat state.",
         },
         {
-            "id": "mechanics",
-            "label": "Mechanics",
+            "id": "scene",
+            "label": "Scene",
             "content": join_lines(
                 [
+                    f"Round {data.get('round', '?')} in encounter {data.get('encounter_id', 'unknown')}.",
                     f"Actor: {current_actor.get('name', current_actor.get('id', 'Unknown'))}",
                     f"Action Type: {data.get('action_type', 'action')}",
                     f"Bonus Action used: {bool(data.get('bonus_action'))}",
@@ -988,11 +994,6 @@ def build_combat_turn_envelope(data: Dict[str, Any]) -> Dict[str, Any]:
                     f"Movement used: {data.get('movement_ft', 0)} ft",
                 ]
             ),
-        },
-        {
-            "id": "rolls",
-            "label": "Rolls",
-            "content": "Resolved using command payloads and persisted combat state.",
         },
         {
             "id": "outcome",
@@ -6866,9 +6867,10 @@ def command_combat_end(args: argparse.Namespace, payload: Dict[str, Any]) -> Tup
         build_scene_turn_envelope(
             f"Encounter Ended - {encounter_data.get('name', encounter_data.get('id', encounter_id))}",
             {
-                "scene": "The active encounter is now resolved.",
-                "mechanics": join_lines(
+                "rolls": "No roll required. Encounter end was logged directly.",
+                "scene": join_lines(
                     [
+                        "The active encounter is now resolved.",
                         f"Status: {encounter_data.get('status', 'ended')}",
                         f"Ended at: {encounter_data.get('ended_at', ended_at)}",
                     ]
@@ -7076,15 +7078,8 @@ def command_recap_generate(args: argparse.Namespace, payload: Dict[str, Any]) ->
         build_scene_turn_envelope(
             f"Campaign Recap - {campaign_id}",
             {
+                "rolls": "No roll required for recap generation.",
                 "scene": f"Current world time: {world['world_date']} {world['world_time']} in {world['region']}.",
-                "mechanics": join_lines(
-                    [
-                        f"Recent turns captured: {len(turns)}",
-                        f"Open quests: {len(open_quests)}",
-                        f"Known rumors: {len(rumors)}",
-                        f"Active clocks: {len(active_clocks)}",
-                    ]
-                ),
                 "outcome": recap_text,
             },
         ),
