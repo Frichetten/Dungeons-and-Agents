@@ -162,9 +162,9 @@ class TestUIContractV1(unittest.TestCase):
 
     def test_ooc_responses_include_ui_contract(self):
         dashboard = run_dmctl("ooc", "dashboard", "--campaign", self.campaign_id)
-        self.assertEqual(dashboard["data"]["ui_contract_version"], UI_CONTRACT_VERSION)
-        self.assertEqual(dashboard["data"]["template_id"], "ooc_panel")
         self.assertIn("ui", dashboard["data"])
+        self.assertEqual(dashboard["data"]["ui"]["ui_contract_version"], UI_CONTRACT_VERSION)
+        self.assertEqual(dashboard["data"]["ui"]["template_id"], "ooc_panel")
         self.assertIn("ui_markdown", dashboard["data"])
 
     def test_combat_responses_include_ui_contract(self):
@@ -195,8 +195,8 @@ class TestUIContractV1(unittest.TestCase):
                 "participants": [{"type": "pc", "id": "pc_hero"}, {"type": "npc", "id": "npc_raider_ui"}],
             },
         )
-        self.assertEqual(started["data"]["template_id"], "combat_turn")
-        self.assertEqual(started["data"]["ui_contract_version"], UI_CONTRACT_VERSION)
+        self.assertEqual(started["data"]["ui"]["template_id"], "combat_turn")
+        self.assertEqual(started["data"]["ui"]["ui_contract_version"], UI_CONTRACT_VERSION)
 
         encounter_id = started["data"]["encounter_id"]
         combatants = started["data"]["combatants"]
@@ -216,8 +216,8 @@ class TestUIContractV1(unittest.TestCase):
                 "end_turn": True,
             },
         )
-        self.assertEqual(acted["data"]["template_id"], "combat_turn")
-        self.assertEqual(acted["data"]["ui_contract_version"], UI_CONTRACT_VERSION)
+        self.assertEqual(acted["data"]["ui"]["template_id"], "combat_turn")
+        self.assertEqual(acted["data"]["ui"]["ui_contract_version"], UI_CONTRACT_VERSION)
 
     def test_failure_responses_include_system_error_template(self):
         failed = run_dmctl(
@@ -228,9 +228,9 @@ class TestUIContractV1(unittest.TestCase):
             payload={"public_note": "Should fail without open turn"},
             expect_ok=False,
         )
-        self.assertEqual(failed["template_id"], "system_error")
-        self.assertEqual(failed["ui_contract_version"], UI_CONTRACT_VERSION)
         self.assertIn("ui", failed)
+        self.assertEqual(failed["ui"]["template_id"], "system_error")
+        self.assertEqual(failed["ui"]["ui_contract_version"], UI_CONTRACT_VERSION)
         self.assertIn("ui_markdown", failed)
 
 

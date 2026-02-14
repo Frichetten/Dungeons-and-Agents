@@ -20,7 +20,6 @@ from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
 from dm.ui_contract import (
-    UI_CONTRACT_VERSION,
     build_envelope as build_ui_envelope,
     render_markdown as render_ui_markdown,
     validate_envelope_or_raise,
@@ -863,8 +862,6 @@ def join_lines(lines: Sequence[str], fallback: str = "No update.") -> str:
 def attach_ui_envelope(data: Dict[str, Any], envelope: Dict[str, Any]) -> Dict[str, Any]:
     validate_envelope_or_raise(envelope)
     wrapped = dict(data)
-    wrapped["ui_contract_version"] = envelope["ui_contract_version"]
-    wrapped["template_id"] = envelope["template_id"]
     wrapped["ui"] = envelope
     wrapped["ui_markdown"] = render_ui_markdown(envelope)
     return wrapped
@@ -965,8 +962,6 @@ def build_combat_start_envelope(data: Dict[str, Any]) -> Dict[str, Any]:
         },
         {"id": "rolls", "label": "Rolls", "content": "Initiative rolled for each participant and logged."},
         {"id": "outcome", "label": "Outcome", "content": join_lines(combatant_lines, fallback="No combatants were created.")},
-        {"id": "state_diff", "label": "State Diff", "content": f"Encounter active: {data.get('encounter_id', 'unknown')}."},
-        {"id": "open_threads", "label": "Open Threads", "content": "Choose the first tactical action for the active combatant."},
     ]
     return build_ui_envelope("combat_turn", f"Round {data.get('round', 1)} - Combat Starts", sections=sections)
 
@@ -974,16 +969,6 @@ def build_combat_start_envelope(data: Dict[str, Any]) -> Dict[str, Any]:
 def build_combat_turn_envelope(data: Dict[str, Any]) -> Dict[str, Any]:
     current_actor = data.get("current_actor", {}) if isinstance(data.get("current_actor"), dict) else {}
     next_actor = data.get("next_actor", {}) if isinstance(data.get("next_actor"), dict) else {}
-    combatants = data.get("combatants", [])
-
-    state_diff_lines: List[str] = []
-    if isinstance(combatants, list):
-        for row in combatants:
-            if not isinstance(row, dict):
-                continue
-            state_diff_lines.append(
-                f"{row.get('name', row.get('id', 'Unknown'))}: HP {row.get('current_hp', '?')}/{row.get('max_hp', '?')}"
-            )
 
     sections = [
         {
@@ -1017,17 +1002,6 @@ def build_combat_turn_envelope(data: Dict[str, Any]) -> Dict[str, Any]:
                     f"Action: {data.get('action', 'acts')}",
                     f"Next actor: {next_actor.get('name', next_actor.get('id', 'Unknown'))}",
                     str(data.get("round_summary", "")).strip(),
-                ]
-            ),
-        },
-        {"id": "state_diff", "label": "State Diff", "content": join_lines(state_diff_lines)},
-        {
-            "id": "open_threads",
-            "label": "Open Threads",
-            "content": join_lines(
-                [
-                    f"Concentration broken: {bool(data.get('concentration_broken'))}",
-                    f"Round effects: {json.dumps(data.get('round_effects', {}), separators=(',', ':'))}",
                 ]
             ),
         },
@@ -6900,8 +6874,6 @@ def command_combat_end(args: argparse.Namespace, payload: Dict[str, Any]) -> Tup
                     ]
                 ),
                 "outcome": str(encounter_data.get("notes", "") or "Combat state was committed and logged."),
-                "state_diff": f"Encounter {encounter_id} changed to ended.",
-                "open_threads": "Commit or continue with post-combat actions.",
             },
         ),
     )
@@ -7099,16 +7071,6 @@ def command_recap_generate(args: argparse.Namespace, payload: Dict[str, Any]) ->
     if not full_response:
         recap_data["recent_turn_diffs_mode"] = "summary"
 
-    state_diff_lines = [
-        (
-            f"Turn {row.get('turn_number')}: "
-            f"resources={row.get('diff_summary', {}).get('hp_resources_changed', 0)}, "
-            f"inventory={row.get('diff_summary', {}).get('inventory_changed', 0)}, "
-            f"relationships={row.get('diff_summary', {}).get('relationships_changed', 0)}, "
-            f"quests={row.get('diff_summary', {}).get('quests_changed', 0)}"
-        )
-        for row in diff_summaries
-    ]
     recap_data = attach_ui_envelope(
         recap_data,
         build_scene_turn_envelope(
@@ -7124,8 +7086,6 @@ def command_recap_generate(args: argparse.Namespace, payload: Dict[str, Any]) ->
                     ]
                 ),
                 "outcome": recap_text,
-                "state_diff": join_lines(state_diff_lines),
-                "open_threads": join_lines([str(item) for item in hooks]),
             },
         ),
     )
@@ -7399,8 +7359,6 @@ def emit_failure(command: str, error: str, details: Optional[Dict[str, Any]] = N
     }
     try:
         envelope = build_system_error_envelope(command, error, payload)
-        response["ui_contract_version"] = UI_CONTRACT_VERSION
-        response["template_id"] = envelope["template_id"]
         response["ui"] = envelope
         response["ui_markdown"] = render_ui_markdown(envelope)
     except Exception:
