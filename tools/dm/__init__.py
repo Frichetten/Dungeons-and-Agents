@@ -1,1 +1,1 @@
-"""Local DM tooling package for the dnd5e simulator."""
+"""Local DM tooling package for Dungeons and Agents."""
