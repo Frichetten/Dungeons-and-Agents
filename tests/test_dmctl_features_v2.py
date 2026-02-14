@@ -324,6 +324,17 @@ class TestDMCTLFeaturesV2(unittest.TestCase):
         self.assertEqual(campaign_help["data"]["requested_group"], "campaign")
         self.assertIn("create", campaign_help["data"]["requested_actions"])
 
+        prefixed_help = subprocess.run(
+            [str(DMCTL), "--campaign", "demo", "campaign", "--help"],
+            capture_output=True,
+            text=True,
+            cwd=str(ROOT),
+            check=False,
+        )
+        prefixed_body = json.loads(prefixed_help.stdout.strip())
+        self.assertTrue(prefixed_body["ok"])
+        self.assertEqual(prefixed_body["data"]["requested_group"], "campaign")
+
     def test_05_ooc_undo_last_committed_turn(self):
         marker = f"CommittedUndo-{uuid.uuid4().hex[:6]}"
         run_dmctl("turn", "begin", "--campaign", self.campaign_id)
@@ -349,10 +360,37 @@ class TestDMCTLFeaturesV2(unittest.TestCase):
         self.assertEqual(undo["command"], "ooc undo_last_turn")
         self.assertEqual(undo["data"]["turn"]["status"], "rolled_back")
         self.assertEqual(undo["data"]["turn"]["mode"], "committed")
+        self.assertEqual(undo["data"]["turn"]["reason"], "ooc undo_last_turn")
+
+        run_dmctl("turn", "begin", "--campaign", self.campaign_id)
+        run_dmctl(
+            "item",
+            "grant",
+            "--campaign",
+            self.campaign_id,
+            payload={
+                "owner_type": "pc",
+                "owner_id": "pc_hero",
+                "item_name": f"{marker}-2",
+                "quantity": 1,
+            },
+        )
+        run_dmctl("turn", "commit", "--campaign", self.campaign_id, "--summary", "Add marker for reason passthrough")
+        custom_reason = "manual custom undo reason"
+        undo_with_reason = run_dmctl(
+            "ooc",
+            "undo_last_turn",
+            "--campaign",
+            self.campaign_id,
+            "--reason",
+            custom_reason,
+        )
+        self.assertEqual(undo_with_reason["data"]["turn"]["reason"], custom_reason)
 
         post_undo = run_dmctl("state", "get", "--campaign", self.campaign_id, "--full")
         names_after = {row["item_name"] for row in post_undo["data"]["inventory"]}
         self.assertNotIn(marker, names_after)
+        self.assertNotIn(f"{marker}-2", names_after)
 
         validate = run_dmctl("validate", "--campaign", self.campaign_id)
         self.assertTrue(validate["ok"])

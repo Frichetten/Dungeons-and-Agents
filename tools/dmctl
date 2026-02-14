@@ -4347,7 +4347,7 @@ def command_ooc(args: argparse.Namespace, payload: Dict[str, Any]) -> Tuple[Dict
         return (backup, [])
 
     if action == "undo_last_turn":
-        reason = str(payload.get("reason", "ooc undo_last_turn"))
+        reason = str(args.reason or payload.get("reason") or "ooc undo_last_turn")
         conn = connect_campaign_db(campaign_id)
         open_turn = get_open_turn(conn, campaign_id)
         if open_turn is not None:
@@ -5537,6 +5537,58 @@ def build_help_payload(group: Optional[str], action: Optional[str]) -> Dict[str,
     return payload
 
 
+def infer_help_scope(raw_args: Sequence[str]) -> Tuple[Optional[str], Optional[str]]:
+    options_with_values = {
+        "--campaign",
+        "--name",
+        "--backup",
+        "--label",
+        "--payload",
+        "--note",
+        "--summary",
+        "--reason",
+        "--formula",
+        "--context",
+        "--path",
+        "--profile",
+        "--keep-highest",
+        "--keep-lowest",
+        "--drop-highest",
+        "--drop-lowest",
+    }
+    flag_only_options = {
+        "--include-hidden",
+        "--full",
+        "--advantage",
+        "--disadvantage",
+        "-h",
+        "--help",
+    }
+
+    positionals: List[str] = []
+    idx = 0
+    while idx < len(raw_args):
+        token = raw_args[idx]
+        if token in flag_only_options:
+            idx += 1
+            continue
+        if token in options_with_values:
+            idx += 2
+            continue
+        if token.startswith("--") and "=" in token:
+            idx += 1
+            continue
+        if token.startswith("-"):
+            idx += 1
+            continue
+        positionals.append(token)
+        idx += 1
+
+    group = positionals[0] if len(positionals) >= 1 else None
+    action = positionals[1] if len(positionals) >= 2 else None
+    return group, action
+
+
 def normalize_command(args: argparse.Namespace) -> Tuple[str, str, str]:
     group = args.group
     action = args.action
@@ -5606,9 +5658,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     ensure_base_dirs()
     raw_args = list(argv) if argv is not None else list(sys.argv[1:])
     if any(flag in raw_args for flag in ("-h", "--help")):
-        positionals = [arg for arg in raw_args if not arg.startswith("-")]
-        group = positionals[0] if len(positionals) >= 1 else None
-        action = positionals[1] if len(positionals) >= 2 else None
+        group, action = infer_help_scope(raw_args)
         return emit_success("help", build_help_payload(group, action))
     parser = build_parser()
     args = parser.parse_args(raw_args)
