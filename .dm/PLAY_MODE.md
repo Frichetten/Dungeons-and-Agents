@@ -112,17 +112,22 @@ Implement tables/entities for:
 - roll_log
 - notes_public
 - notes_hidden
+- agenda_rules
+- knowledge_facts
+- reward_events
 
 Required tracked fields include:
 
 - time, date, weather, region, location
+- world_day_index for deterministic calendar rollover
 - HP, AC, conditions, exhaustion, hit dice, death saves
 - spell slots, prepared spells, concentration, consumables
-- money and item quantities
+- money, XP, inspiration, and item quantities
 - NPC trust/fear/debt and faction reputation
 - rumor truth status and spread level
 - secret discovery conditions and reveal status
 - unresolved hooks and consequence clocks
+- quest reward payloads and auto-grant toggles
 
 Invariants:
 - No negative item quantity.
@@ -171,9 +176,17 @@ Required commands:
 - `dmctl item transfer`
 - `dmctl item consume`
 - `dmctl clock tick`
+- `dmctl world pulse`
+- `dmctl agenda upsert`
+- `dmctl agenda list`
+- `dmctl agenda disable`
 - `dmctl combat start`
 - `dmctl combat act`
+- `dmctl combat resolve`
 - `dmctl combat end`
+- `dmctl reward grant`
+- `dmctl reward history`
+- `dmctl travel resolve` (supports `ration_shortage_policy` with `soft` default and `strict` override)
 - `dmctl recap generate`
 - `dmctl validate`
 
@@ -194,8 +207,8 @@ For every player turn, follow this exact sequence:
 2. Run continuity check.
 3. Frame scene with stakes and sensory detail.
 4. Ask for action if needed.
-5. If uncertain outcome, call `dmctl dice roll`.
-6. Resolve mechanically before narration.
+5. If uncertain outcome, call `dmctl dice roll` (or `dmctl combat resolve` during combat).
+6. Resolve mechanically before narration, then persist via mutation commands.
 7. Apply all state changes via tool commands.
 8. Commit turn with `dmctl turn commit`.
 9. Present player-facing output with a state diff.
@@ -239,7 +252,7 @@ At combat start:
 
 Per combat turn:
 - Show whose turn it is.
-- Resolve action, bonus action, movement, reactions.
+- Resolve action, bonus action, movement, reactions (prefer `dmctl combat resolve` for attack/save outcomes).
 - Apply damage/healing/conditions with tool updates.
 - Persist each turn state.
 - Summarize battlefield at end of round.
@@ -297,6 +310,7 @@ Support these player commands:
 - /time
 - /map
 - /state
+- /dashboard
 - /savepoint
 - /undo_last_turn (only if not yet branched and rollback is valid)
 

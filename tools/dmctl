@@ -19,8 +19,25 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 SQLITE_BUSY_TIMEOUT_MS = 5000
+
+CALENDAR_MONTHS = [
+    "Hammer",
+    "Alturiak",
+    "Ches",
+    "Tarsakh",
+    "Mirtul",
+    "Kythorn",
+    "Flamerule",
+    "Eleasis",
+    "Eleint",
+    "Marpenoth",
+    "Uktar",
+    "Nightal",
+]
+CALENDAR_DAYS_PER_MONTH = 30
+CALENDAR_DAYS_PER_YEAR = CALENDAR_DAYS_PER_MONTH * len(CALENDAR_MONTHS)
 
 ROOT = Path(__file__).resolve().parent.parent
 DM_ROOT = ROOT / ".dm"
@@ -134,6 +151,83 @@ def to_jsonable(rows: Iterable[sqlite3.Row]) -> List[Dict[str, Any]]:
     return [as_dict(row) for row in rows]
 
 
+def month_index(name: str) -> Optional[int]:
+    normalized = str(name or "").strip().lower()
+    for idx, month_name in enumerate(CALENDAR_MONTHS):
+        if month_name.lower() == normalized:
+            return idx
+    return None
+
+
+def parse_world_date_to_day_index(value: Any) -> Optional[int]:
+    text = str(value or "").strip()
+    match = re.match(r"^(\d{1,2})\s+([A-Za-z]+)\s+(-?\d+)\s+DR$", text, flags=re.IGNORECASE)
+    if not match:
+        return None
+    day = safe_int(match.group(1), "world_date.day")
+    month_idx = month_index(match.group(2))
+    year = safe_int(match.group(3), "world_date.year")
+    if month_idx is None:
+        return None
+    day = max(1, min(CALENDAR_DAYS_PER_MONTH, day))
+    year_base = year * CALENDAR_DAYS_PER_YEAR
+    return year_base + (month_idx * CALENDAR_DAYS_PER_MONTH) + (day - 1)
+
+
+def format_world_date_from_day_index(day_index: int) -> str:
+    normalized = max(0, safe_int(day_index, "world_day_index"))
+    year = normalized // CALENDAR_DAYS_PER_YEAR
+    day_of_year = normalized % CALENDAR_DAYS_PER_YEAR
+    month_idx = day_of_year // CALENDAR_DAYS_PER_MONTH
+    day = (day_of_year % CALENDAR_DAYS_PER_MONTH) + 1
+    month_name = CALENDAR_MONTHS[month_idx]
+    return f"{day} {month_name} {year} DR"
+
+
+def sync_world_day_index(conn: sqlite3.Connection) -> None:
+    if not sqlite_table_exists(conn, "world_state"):
+        return
+    info_rows = to_jsonable(conn.execute("PRAGMA table_info(world_state)"))
+    columns = {str(row.get("name")) for row in info_rows}
+    if "world_day_index" not in columns:
+        return
+    rows = to_jsonable(conn.execute("SELECT campaign_id, world_date, world_day_index FROM world_state"))
+    for row in rows:
+        parsed = parse_world_date_to_day_index(row.get("world_date"))
+        current = row.get("world_day_index")
+        try:
+            current_index = safe_int(current, "world_day_index")
+        except DMError:
+            current_index = None
+
+        if parsed is None:
+            # Preserve non-standard date strings; only sanitize index if needed.
+            if current_index is None:
+                continue
+            sanitized_index = max(0, current_index)
+            if current_index != sanitized_index:
+                conn.execute(
+                    """
+                    UPDATE world_state
+                    SET world_day_index = ?, updated_at = ?
+                    WHERE campaign_id = ?
+                    """,
+                    (sanitized_index, now_iso(), row["campaign_id"]),
+                )
+            continue
+
+        desired_date = format_world_date_from_day_index(parsed)
+        if current_index != parsed or str(row.get("world_date")) != desired_date:
+            conn.execute(
+                """
+                UPDATE world_state
+                SET world_day_index = ?, world_date = ?, updated_at = ?
+                WHERE campaign_id = ?
+                """,
+                (parsed, desired_date, now_iso(), row["campaign_id"]),
+            )
+
+
 def connect_campaign_db(campaign_id: str) -> sqlite3.Connection:
     db_path = campaign_db_path(campaign_id)
     if not db_path.exists():
@@ -213,6 +307,7 @@ def apply_migrations(conn: sqlite3.Connection) -> List[str]:
         )
         ran.append(path.name)
 
+    sync_world_day_index(conn)
     conn.commit()
     return ran
 
@@ -590,7 +685,7 @@ def snapshot_from_db(conn: sqlite3.Connection, campaign_id: str) -> Dict[str, An
     open_turn = get_open_turn(conn, campaign_id)
     players = to_jsonable(
         conn.execute(
-            "SELECT id, name, level, max_hp, current_hp, ac, location_id FROM player_characters WHERE campaign_id = ?",
+            "SELECT id, name, level, max_hp, current_hp, ac, xp_total, inspiration, location_id FROM player_characters WHERE campaign_id = ?",
             (campaign_id,),
         )
     )
@@ -667,7 +762,7 @@ def load_turn_diff_state(conn: sqlite3.Connection, campaign_id: str) -> Dict[str
             SELECT id, name, current_hp, max_hp, ac, conditions_json, exhaustion,
                    hit_dice_total, hit_dice_used, death_saves_success, death_saves_fail,
                    spell_slots_json, concentration_spell, consumables_json,
-                   money_cp, location_id
+                   xp_total, inspiration, money_cp, location_id
             FROM player_characters
             WHERE campaign_id = ?
             """,
@@ -834,6 +929,8 @@ def build_turn_diff(before: Dict[str, Any], after: Dict[str, Any]) -> Dict[str, 
             "spell_slots_json",
             "concentration_spell",
             "consumables_json",
+            "xp_total",
+            "inspiration",
         ],
         "player_id",
     )
@@ -971,12 +1068,20 @@ def advance_world_state_time(
     minutes: int = 0,
 ) -> Dict[str, Any]:
     row = conn.execute(
-        "SELECT world_date, world_time FROM world_state WHERE campaign_id = ?",
+        "SELECT world_date, world_day_index, world_time FROM world_state WHERE campaign_id = ?",
         (campaign_id,),
     ).fetchone()
     if row is None:
         raise DMError("world_state_missing", {"campaign": campaign_id})
     before_date = str(row["world_date"])
+    before_day_index_raw = row["world_day_index"]
+    parsed_before_day_index = parse_world_date_to_day_index(before_date)
+    try:
+        before_day_index = safe_int(before_day_index_raw, "world_day_index")
+    except DMError:
+        before_day_index = parsed_before_day_index if parsed_before_day_index is not None else 0
+    if parsed_before_day_index is not None and before_day_index != parsed_before_day_index:
+        before_day_index = parsed_before_day_index
     before_time = str(row["world_time"])
     current_hour, current_minute = parse_clock_time(before_time)
     total_minutes = (current_hour * 60) + current_minute + (hours * 60) + minutes
@@ -991,30 +1096,20 @@ def advance_world_state_time(
     new_minute = total_minutes % 60
     new_time = format_clock_time(new_hour, new_minute)
 
-    new_date = before_date
-    if days_advanced:
-        parts = before_date.split(" ", 1)
-        try:
-            day = int(parts[0])
-            suffix = parts[1] if len(parts) > 1 else ""
-            new_date = f"{day + days_advanced} {suffix}".strip()
-        except ValueError:
-            if days_advanced > 0:
-                new_date = f"{before_date} (+{days_advanced}d)"
-            else:
-                new_date = f"{before_date} ({days_advanced}d)"
+    new_day_index = max(0, before_day_index + days_advanced)
+    new_date = format_world_date_from_day_index(new_day_index)
 
     conn.execute(
         """
         UPDATE world_state
-        SET world_time = ?, world_date = ?, updated_at = ?
+        SET world_time = ?, world_day_index = ?, world_date = ?, updated_at = ?
         WHERE campaign_id = ?
         """,
-        (new_time, new_date, now_iso(), campaign_id),
+        (new_time, new_day_index, new_date, now_iso(), campaign_id),
     )
     return {
-        "before": {"world_date": before_date, "world_time": before_time},
-        "after": {"world_date": new_date, "world_time": new_time},
+        "before": {"world_date": before_date, "world_day_index": before_day_index, "world_time": before_time},
+        "after": {"world_date": new_date, "world_day_index": new_day_index, "world_time": new_time},
         "days_advanced": days_advanced,
     }
 
@@ -1156,6 +1251,41 @@ def parse_dice_formula(formula: str) -> Tuple[int, int, int]:
         raise DMError("invalid_dice_formula", {"formula": formula})
     modifier = sum(term["sign"] * term["value"] for term in terms if term["kind"] == "const")
     return safe_int(die["number"], "number"), safe_int(die["sides"], "sides"), safe_int(modifier, "modifier")
+
+
+def build_dice_expression(terms: List[Dict[str, Any]]) -> str:
+    chunks: List[str] = []
+    for idx, term in enumerate(terms):
+        sign = safe_int(term.get("sign", 1), "sign")
+        prefix = ""
+        if sign < 0:
+            prefix = "-"
+        elif idx > 0:
+            prefix = "+"
+        if term["kind"] == "const":
+            token = str(abs(safe_int(term.get("value", 0), "value")))
+        else:
+            token = f"{safe_int(term.get('number', 1), 'number')}d{safe_int(term.get('sides', 20), 'sides')}"
+        chunks.append(prefix + token)
+    return "".join(chunks) if chunks else "0"
+
+
+def critical_damage_formula(formula: str) -> str:
+    terms = parse_dice_expression(formula)
+    crit_terms: List[Dict[str, Any]] = []
+    for term in terms:
+        if term["kind"] == "dice":
+            crit_terms.append(
+                {
+                    "kind": "dice",
+                    "sign": term["sign"],
+                    "number": safe_int(term["number"], "number") * 2,
+                    "sides": safe_int(term["sides"], "sides"),
+                }
+            )
+        else:
+            crit_terms.append(dict(term))
+    return build_dice_expression(crit_terms)
 
 
 def roll_dice(
@@ -1473,6 +1603,8 @@ def command_campaign_create(args: argparse.Namespace, payload: Dict[str, Any]) -
     ran_migrations = apply_migrations(conn)
 
     ts = now_iso()
+    default_world_date = "1 Hammer 1492 DR"
+    default_day_index = parse_world_date_to_day_index(default_world_date) or 0
     existing = conn.execute("SELECT id FROM campaigns WHERE id = ?", (campaign_id,)).fetchone()
     if existing is None:
         conn.execute(
@@ -1485,12 +1617,12 @@ def command_campaign_create(args: argparse.Namespace, payload: Dict[str, Any]) -
         conn.execute(
             """
             INSERT INTO world_state (
-                campaign_id, world_date, world_time, weather, region,
+                campaign_id, world_date, world_day_index, world_time, weather, region,
                 location_id, legal_heat, notoriety, active_arc,
                 unresolved_hooks_json, consequence_clocks_json, updated_at
-            ) VALUES (?, '1 Hammer 1492 DR', '08:00', 'clear', 'Unknown', NULL, 0, 0, '', '[]', '[]', ?)
+            ) VALUES (?, ?, ?, '08:00', 'clear', 'Unknown', NULL, 0, 0, '', '[]', '[]', ?)
             """,
-            (campaign_id, ts),
+            (campaign_id, default_world_date, default_day_index, ts),
         )
     else:
         warnings.append("campaign already existed; returning current state")
@@ -1752,7 +1884,6 @@ def command_campaign_seed(args: argparse.Namespace, payload: Dict[str, Any]) -> 
         fields: List[str] = []
         values: List[Any] = []
         for key in [
-            "world_date",
             "world_time",
             "weather",
             "region",
@@ -1764,6 +1895,21 @@ def command_campaign_seed(args: argparse.Namespace, payload: Dict[str, Any]) -> 
             if key in world_state:
                 fields.append(f"{key} = ?")
                 values.append(world_state[key])
+        explicit_day_index = world_state.get("world_day_index")
+        explicit_world_date = world_state.get("world_date")
+        if explicit_day_index is not None:
+            parsed_day_index = max(0, safe_int(explicit_day_index, "world_day_index"))
+            fields.append("world_day_index = ?")
+            values.append(parsed_day_index)
+            fields.append("world_date = ?")
+            values.append(format_world_date_from_day_index(parsed_day_index))
+        elif explicit_world_date is not None:
+            parsed_day_index = parse_world_date_to_day_index(explicit_world_date)
+            fields.append("world_date = ?")
+            values.append(str(explicit_world_date))
+            if parsed_day_index is not None:
+                fields.append("world_day_index = ?")
+                values.append(parsed_day_index)
         if "location_name" in world_state:
             location_id = ensure_location(
                 conn,
@@ -2503,6 +2649,8 @@ def upsert_player_character(conn: sqlite3.Connection, campaign_id: str, pc: Dict
         "prepared_spells_json": json.dumps(pc.get("prepared_spells", []), separators=(",", ":")),
         "concentration_spell": str(pc.get("concentration_spell", "")),
         "consumables_json": json.dumps(pc.get("consumables", {}), separators=(",", ":")),
+        "xp_total": max(0, safe_int(pc.get("xp_total", 0), "xp_total")),
+        "inspiration": 1 if safe_int(pc.get("inspiration", 0), "inspiration") > 0 else 0,
         "money_cp": safe_int(pc.get("money_cp", 0), "money_cp"),
         "location_id": location_id,
         "initiative_mod": safe_int(pc.get("initiative_mod", 0), "initiative_mod"),
@@ -2519,13 +2667,13 @@ def upsert_player_character(conn: sqlite3.Connection, campaign_id: str, pc: Dict
                 conditions_json, exhaustion, hit_dice_total, hit_dice_used,
                 death_saves_success, death_saves_fail, spell_slots_json,
                 prepared_spells_json, concentration_spell, consumables_json,
-                money_cp, location_id, initiative_mod, is_active, created_at, updated_at
+                xp_total, inspiration, money_cp, location_id, initiative_mod, is_active, created_at, updated_at
             ) VALUES (
                 :id, :campaign_id, :name, :char_class, :level, :max_hp, :current_hp, :ac,
                 :conditions_json, :exhaustion, :hit_dice_total, :hit_dice_used,
                 :death_saves_success, :death_saves_fail, :spell_slots_json,
                 :prepared_spells_json, :concentration_spell, :consumables_json,
-                :money_cp, :location_id, :initiative_mod, :is_active, :created_at, :updated_at
+                :xp_total, :inspiration, :money_cp, :location_id, :initiative_mod, :is_active, :created_at, :updated_at
             )
             """,
             payload,
@@ -2551,6 +2699,8 @@ def upsert_player_character(conn: sqlite3.Connection, campaign_id: str, pc: Dict
                 prepared_spells_json = :prepared_spells_json,
                 concentration_spell = :concentration_spell,
                 consumables_json = :consumables_json,
+                xp_total = :xp_total,
+                inspiration = :inspiration,
                 money_cp = :money_cp,
                 location_id = :location_id,
                 initiative_mod = :initiative_mod,
@@ -2628,6 +2778,7 @@ def command_state_set(args: argparse.Namespace, payload: Dict[str, Any]) -> Tupl
         values: List[Any] = []
         allowed = {
             "world_date",
+            "world_day_index",
             "world_time",
             "weather",
             "region",
@@ -2650,6 +2801,21 @@ def command_state_set(args: argparse.Namespace, payload: Dict[str, Any]) -> Tupl
                 loc_id = ensure_location(conn, campaign_id, location_name=str(value), region=ws.get("region", ""))
                 fields.append("location_id = ?")
                 values.append(loc_id)
+                continue
+            if key == "world_day_index":
+                parsed_day_index = max(0, safe_int(value, "world_day_index"))
+                fields.append("world_day_index = ?")
+                values.append(parsed_day_index)
+                fields.append("world_date = ?")
+                values.append(format_world_date_from_day_index(parsed_day_index))
+                continue
+            if key == "world_date":
+                parsed_day_index = parse_world_date_to_day_index(value)
+                fields.append("world_date = ?")
+                values.append(str(value))
+                if parsed_day_index is not None:
+                    fields.append("world_day_index = ?")
+                    values.append(parsed_day_index)
                 continue
             if key == "unresolved_hooks":
                 fields.append("unresolved_hooks_json = ?")
@@ -3029,6 +3195,373 @@ def command_relationship_adjust(args: argparse.Namespace, payload: Dict[str, Any
     return ({"relationship": as_dict(updated), "turn_id": turn_id}, [])
 
 
+def resolve_faction_id(
+    conn: sqlite3.Connection,
+    campaign_id: str,
+    faction_id: Optional[str] = None,
+    faction_name: Optional[str] = None,
+) -> Optional[str]:
+    if faction_id:
+        row = conn.execute(
+            "SELECT id FROM factions WHERE campaign_id = ? AND id = ?",
+            (campaign_id, faction_id),
+        ).fetchone()
+        if row is None:
+            raise DMError("faction_not_found", {"campaign": campaign_id, "faction_id": faction_id})
+        return str(row["id"])
+    if faction_name:
+        row = conn.execute(
+            "SELECT id FROM factions WHERE campaign_id = ? AND name = ?",
+            (campaign_id, faction_name),
+        ).fetchone()
+        if row is None:
+            raise DMError("faction_not_found", {"campaign": campaign_id, "name": faction_name})
+        return str(row["id"])
+    return None
+
+
+def apply_relationship_delta(
+    conn: sqlite3.Connection,
+    campaign_id: str,
+    relation: Dict[str, Any],
+) -> Dict[str, Any]:
+    required = ["source_type", "source_id", "target_type", "target_id"]
+    for key in required:
+        if key not in relation:
+            raise DMError("invalid_relationship_payload", {"missing": key})
+
+    source_type = str(relation["source_type"])
+    source_id = str(relation["source_id"])
+    target_type = str(relation["target_type"])
+    target_id = str(relation["target_id"])
+    ts = now_iso()
+
+    row = conn.execute(
+        """
+        SELECT * FROM relationships
+        WHERE campaign_id = ? AND source_type = ? AND source_id = ? AND target_type = ? AND target_id = ?
+        """,
+        (campaign_id, source_type, source_id, target_type, target_id),
+    ).fetchone()
+    if row is None:
+        rel_id = uuid_id("rel")
+        conn.execute(
+            """
+            INSERT INTO relationships (
+                id, campaign_id, source_type, source_id, target_type, target_id,
+                trust, fear, debt, reputation, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                rel_id,
+                campaign_id,
+                source_type,
+                source_id,
+                target_type,
+                target_id,
+                safe_int(relation.get("trust_delta", 0), "trust_delta"),
+                safe_int(relation.get("fear_delta", 0), "fear_delta"),
+                safe_int(relation.get("debt_delta", 0), "debt_delta"),
+                safe_int(relation.get("reputation_delta", 0), "reputation_delta"),
+                ts,
+            ),
+        )
+    else:
+        rel_id = str(row["id"])
+        conn.execute(
+            """
+            UPDATE relationships
+            SET trust = trust + ?, fear = fear + ?, debt = debt + ?, reputation = reputation + ?, updated_at = ?
+            WHERE id = ?
+            """,
+            (
+                safe_int(relation.get("trust_delta", 0), "trust_delta"),
+                safe_int(relation.get("fear_delta", 0), "fear_delta"),
+                safe_int(relation.get("debt_delta", 0), "debt_delta"),
+                safe_int(relation.get("reputation_delta", 0), "reputation_delta"),
+                ts,
+                rel_id,
+            ),
+        )
+    updated = conn.execute("SELECT * FROM relationships WHERE id = ?", (rel_id,)).fetchone()
+    return as_dict(updated)
+
+
+def default_reward_recipient(conn: sqlite3.Connection, campaign_id: str) -> Tuple[str, str]:
+    pcs = to_jsonable(
+        conn.execute(
+            "SELECT id FROM player_characters WHERE campaign_id = ? AND is_active = 1 ORDER BY id",
+            (campaign_id,),
+        )
+    )
+    if len(pcs) == 1:
+        return ("pc", str(pcs[0]["id"]))
+    return ("party", "party")
+
+
+def normalize_reward_grants(
+    conn: sqlite3.Connection,
+    campaign_id: str,
+    payload: Dict[str, Any],
+) -> List[Dict[str, Any]]:
+    grants = payload.get("grants")
+    if grants is None:
+        reward = payload.get("reward")
+        if reward is None:
+            reward = {
+                key: value
+                for key, value in payload.items()
+                if key
+                in {
+                    "currency_cp",
+                    "xp",
+                    "inspiration",
+                    "items",
+                    "faction_deltas",
+                    "relationship_deltas",
+                    "hooks_add",
+                    "hooks_remove",
+                }
+            }
+        recipient_type = payload.get("recipient_type")
+        recipient_id = payload.get("recipient_id")
+        if not recipient_type or not recipient_id:
+            recipient_type, recipient_id = default_reward_recipient(conn, campaign_id)
+        grants = [{"recipient_type": recipient_type, "recipient_id": recipient_id, "reward": reward}]
+
+    if not isinstance(grants, list) or not grants:
+        raise DMError("invalid_reward_payload", {"error": "grants must be a non-empty list"})
+
+    normalized: List[Dict[str, Any]] = []
+    for grant in grants:
+        if not isinstance(grant, dict):
+            raise DMError("invalid_reward_payload", {"grant": grant})
+        recipient_type = str(grant.get("recipient_type", "")).strip()
+        recipient_id = str(grant.get("recipient_id", "")).strip()
+        if not recipient_type or not recipient_id:
+            raise DMError("invalid_reward_payload", {"error": "recipient_type and recipient_id are required"})
+        reward = grant.get("reward", {})
+        if not isinstance(reward, dict):
+            raise DMError("invalid_reward_payload", {"error": "reward must be an object", "grant": grant})
+        normalized.append(
+            {
+                "recipient_type": recipient_type,
+                "recipient_id": recipient_id,
+                "reward": reward,
+            }
+        )
+    return normalized
+
+
+def apply_reward_grants(
+    conn: sqlite3.Connection,
+    campaign_id: str,
+    turn_id: int,
+    source_type: str,
+    source_id: str,
+    grants: List[Dict[str, Any]],
+) -> List[Dict[str, Any]]:
+    created_events: List[Dict[str, Any]] = []
+    for grant in grants:
+        recipient_type = str(grant["recipient_type"])
+        recipient_id = str(grant["recipient_id"])
+        reward = grant["reward"]
+        ts = now_iso()
+
+        if recipient_type not in {"pc", "npc", "party", "faction"}:
+            raise DMError("invalid_reward_recipient_type", {"recipient_type": recipient_type})
+
+        applied: Dict[str, Any] = {
+            "recipient_type": recipient_type,
+            "recipient_id": recipient_id,
+            "currency_cp": 0,
+            "xp": 0,
+            "inspiration": None,
+            "items": [],
+            "faction_deltas": [],
+            "relationship_deltas": [],
+            "hooks": {"added": [], "removed": []},
+        }
+
+        currency_cp = safe_int(reward.get("currency_cp", 0), "currency_cp")
+        xp_delta = safe_int(reward.get("xp", 0), "xp")
+        inspiration_value = reward.get("inspiration")
+        if currency_cp and recipient_type != "pc":
+            raise DMError(
+                "invalid_reward_recipient",
+                {"error": "currency_cp rewards require recipient_type=pc", "recipient_type": recipient_type},
+            )
+        if xp_delta and recipient_type != "pc":
+            raise DMError(
+                "invalid_reward_recipient",
+                {"error": "xp rewards require recipient_type=pc", "recipient_type": recipient_type},
+            )
+        if inspiration_value is not None and recipient_type != "pc":
+            raise DMError(
+                "invalid_reward_recipient",
+                {"error": "inspiration rewards require recipient_type=pc", "recipient_type": recipient_type},
+            )
+        if recipient_type == "pc":
+            pc_row = conn.execute(
+                "SELECT money_cp, xp_total, inspiration FROM player_characters WHERE campaign_id = ? AND id = ?",
+                (campaign_id, recipient_id),
+            ).fetchone()
+            if pc_row is None:
+                raise DMError("player_not_found", {"pc_id": recipient_id})
+            if currency_cp:
+                current_money = safe_int(pc_row["money_cp"], "money_cp")
+                next_money = current_money + currency_cp
+                if next_money < 0:
+                    raise DMError(
+                        "invalid_reward_currency_state",
+                        {"pc_id": recipient_id, "current": current_money, "delta": currency_cp},
+                    )
+                conn.execute(
+                    "UPDATE player_characters SET money_cp = ?, updated_at = ? WHERE campaign_id = ? AND id = ?",
+                    (next_money, ts, campaign_id, recipient_id),
+                )
+                applied["currency_cp"] = currency_cp
+            if xp_delta:
+                current_xp = safe_int(pc_row["xp_total"], "xp_total")
+                next_xp = max(0, current_xp + xp_delta)
+                conn.execute(
+                    "UPDATE player_characters SET xp_total = ?, updated_at = ? WHERE campaign_id = ? AND id = ?",
+                    (next_xp, ts, campaign_id, recipient_id),
+                )
+                applied["xp"] = xp_delta
+            if inspiration_value is not None:
+                inspiration_applied = 1 if bool(inspiration_value) else 0
+                conn.execute(
+                    "UPDATE player_characters SET inspiration = ?, updated_at = ? WHERE campaign_id = ? AND id = ?",
+                    (inspiration_applied, ts, campaign_id, recipient_id),
+                )
+                applied["inspiration"] = inspiration_applied
+
+        items = reward.get("items", [])
+        if items and not isinstance(items, list):
+            raise DMError("invalid_reward_payload", {"error": "items must be a list"})
+        for item in items:
+            if not isinstance(item, dict):
+                raise DMError("invalid_reward_payload", {"error": "item grant must be an object"})
+            owner_type = str(item.get("owner_type") or (recipient_type if recipient_type in {"pc", "npc", "party"} else "party"))
+            owner_id = str(item.get("owner_id") or (recipient_id if recipient_type in {"pc", "npc", "party"} else "party"))
+            quantity = safe_int(item.get("quantity", 1), "quantity")
+            if quantity == 0:
+                continue
+            item_id = ensure_item(conn, campaign_id, item.get("item_id"), item.get("item_name"), item)
+            new_quantity = upsert_inventory_quantity(conn, campaign_id, owner_type, owner_id, item_id, quantity)
+            applied["items"].append(
+                {
+                    "item_id": item_id,
+                    "owner_type": owner_type,
+                    "owner_id": owner_id,
+                    "delta": quantity,
+                    "new_quantity": new_quantity,
+                }
+            )
+
+        faction_deltas = reward.get("faction_deltas", [])
+        if faction_deltas and not isinstance(faction_deltas, list):
+            raise DMError("invalid_reward_payload", {"error": "faction_deltas must be a list"})
+        for delta in faction_deltas:
+            if not isinstance(delta, dict):
+                raise DMError("invalid_reward_payload", {"error": "faction delta must be an object"})
+            faction_id = resolve_faction_id(
+                conn,
+                campaign_id,
+                faction_id=delta.get("faction_id"),
+                faction_name=delta.get("name"),
+            )
+            if not faction_id:
+                raise DMError("faction_identity_required", {"required": ["faction_id", "name"]})
+            conn.execute(
+                """
+                UPDATE factions
+                SET trust = trust + ?, fear = fear + ?, debt = debt + ?, reputation = reputation + ?, updated_at = ?
+                WHERE campaign_id = ? AND id = ?
+                """,
+                (
+                    safe_int(delta.get("trust_delta", 0), "trust_delta"),
+                    safe_int(delta.get("fear_delta", 0), "fear_delta"),
+                    safe_int(delta.get("debt_delta", 0), "debt_delta"),
+                    safe_int(delta.get("reputation_delta", 0), "reputation_delta"),
+                    ts,
+                    campaign_id,
+                    faction_id,
+                ),
+            )
+            updated_faction = conn.execute(
+                "SELECT * FROM factions WHERE campaign_id = ? AND id = ?",
+                (campaign_id, faction_id),
+            ).fetchone()
+            applied["faction_deltas"].append(as_dict(updated_faction))
+
+        relation_deltas = reward.get("relationship_deltas", [])
+        if relation_deltas and not isinstance(relation_deltas, list):
+            raise DMError("invalid_reward_payload", {"error": "relationship_deltas must be a list"})
+        for relation in relation_deltas:
+            if not isinstance(relation, dict):
+                raise DMError("invalid_reward_payload", {"error": "relationship delta must be an object"})
+            applied["relationship_deltas"].append(apply_relationship_delta(conn, campaign_id, relation))
+
+        hooks_add = reward.get("hooks_add", [])
+        hooks_remove = reward.get("hooks_remove", [])
+        if hooks_add or hooks_remove:
+            if not isinstance(hooks_add, list) or not isinstance(hooks_remove, list):
+                raise DMError("invalid_reward_payload", {"error": "hooks_add/remove must be lists"})
+            ws_row = conn.execute(
+                "SELECT unresolved_hooks_json FROM world_state WHERE campaign_id = ?",
+                (campaign_id,),
+            ).fetchone()
+            hooks = json_load(ws_row["unresolved_hooks_json"] if ws_row else "[]", [])
+            for hook in hooks_add:
+                if hook not in hooks:
+                    hooks.append(hook)
+                    applied["hooks"]["added"].append(hook)
+            for hook in hooks_remove:
+                if hook in hooks:
+                    hooks = [entry for entry in hooks if entry != hook]
+                    applied["hooks"]["removed"].append(hook)
+            conn.execute(
+                "UPDATE world_state SET unresolved_hooks_json = ?, updated_at = ? WHERE campaign_id = ?",
+                (json.dumps(hooks, separators=(",", ":")), ts, campaign_id),
+            )
+
+        event_id = uuid_id("reward")
+        conn.execute(
+            """
+            INSERT INTO reward_events (
+                id, campaign_id, turn_id, source_type, source_id, recipient_type, recipient_id, reward_json, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                event_id,
+                campaign_id,
+                turn_id,
+                source_type,
+                source_id,
+                recipient_type,
+                recipient_id,
+                json.dumps(applied, separators=(",", ":")),
+                ts,
+            ),
+        )
+        created_events.append(
+            {
+                "id": event_id,
+                "campaign_id": campaign_id,
+                "turn_id": turn_id,
+                "source_type": source_type,
+                "source_id": source_id,
+                "recipient_type": recipient_type,
+                "recipient_id": recipient_id,
+                "reward": applied,
+                "created_at": ts,
+            }
+        )
+    return created_events
+
+
 def command_quest_add(args: argparse.Namespace, payload: Dict[str, Any]) -> Tuple[Dict[str, Any], List[str]]:
     campaign_id = require_campaign(args.campaign)
     title = payload.get("title")
@@ -3046,8 +3579,8 @@ def command_quest_add(args: argparse.Namespace, payload: Dict[str, Any]) -> Tupl
         """
         INSERT INTO quests (
             id, campaign_id, title, description, status, is_main_arc,
-            source_npc_id, reward_text, created_at, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            source_npc_id, reward_text, reward_json, auto_grant, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             quest_id,
@@ -3058,6 +3591,10 @@ def command_quest_add(args: argparse.Namespace, payload: Dict[str, Any]) -> Tupl
             1 if payload.get("is_main_arc", False) else 0,
             payload.get("source_npc_id"),
             str(payload.get("reward_text", "")),
+            json.dumps(payload.get("reward", payload.get("reward_json", {})), separators=(",", ":"))
+            if not isinstance(payload.get("reward_json"), str)
+            else str(payload.get("reward_json")),
+            1 if payload.get("auto_grant", False) else 0,
             ts,
             ts,
         ),
@@ -3112,10 +3649,21 @@ def command_quest_update(args: argparse.Namespace, payload: Dict[str, Any]) -> T
 
     updates: List[str] = []
     values: List[Any] = []
-    for key in ["title", "description", "status", "is_main_arc", "source_npc_id", "reward_text"]:
+    for key in ["title", "description", "status", "is_main_arc", "source_npc_id", "reward_text", "auto_grant"]:
         if key in payload:
             updates.append(f"{key} = ?")
             values.append(payload[key])
+    if "reward" in payload:
+        updates.append("reward_json = ?")
+        values.append(json.dumps(payload["reward"], separators=(",", ":")))
+    if "reward_json" in payload:
+        reward_json_value = payload["reward_json"]
+        if isinstance(reward_json_value, str):
+            updates.append("reward_json = ?")
+            values.append(reward_json_value)
+        else:
+            updates.append("reward_json = ?")
+            values.append(json.dumps(reward_json_value, separators=(",", ":")))
 
     if updates:
         updates.append("updated_at = ?")
@@ -3162,15 +3710,262 @@ def command_quest_update(args: argparse.Namespace, payload: Dict[str, Any]) -> T
                 ),
             )
 
-    persist_event(conn, campaign_id, turn_id, "quest update", {"quest_id": quest_id, "payload": payload})
-    conn.commit()
     updated_quest = conn.execute("SELECT * FROM quests WHERE id = ?", (quest_id,)).fetchone()
+    reward_events: List[Dict[str, Any]] = []
+    if (
+        str(quest["status"]) != "completed"
+        and updated_quest is not None
+        and str(updated_quest["status"]) == "completed"
+        and safe_int(updated_quest["auto_grant"], "auto_grant") == 1
+    ):
+        reward_payload = json_load(updated_quest["reward_json"], {})
+        if reward_payload:
+            grants = normalize_reward_grants(conn, campaign_id, reward_payload)
+            reward_events = apply_reward_grants(
+                conn,
+                campaign_id,
+                turn_id,
+                source_type="quest",
+                source_id=str(quest_id),
+                grants=grants,
+            )
+
+    persist_event(
+        conn,
+        campaign_id,
+        turn_id,
+        "quest update",
+        {
+            "quest_id": quest_id,
+            "payload": payload,
+            "auto_granted_reward_events": [event["id"] for event in reward_events],
+        },
+    )
+    conn.commit()
     updated_objs = to_jsonable(
         conn.execute("SELECT * FROM quest_objectives WHERE quest_id = ? ORDER BY order_index", (quest_id,))
     )
     conn.close()
 
-    return ({"quest": as_dict(updated_quest), "objectives": updated_objs, "turn_id": turn_id}, [])
+    return (
+        {
+            "quest": as_dict(updated_quest),
+            "objectives": updated_objs,
+            "auto_granted_rewards": reward_events,
+            "turn_id": turn_id,
+        },
+        [],
+    )
+
+
+def command_reward_grant(args: argparse.Namespace, payload: Dict[str, Any]) -> Tuple[Dict[str, Any], List[str]]:
+    campaign_id = require_campaign(args.campaign)
+    conn = connect_campaign_db(campaign_id)
+    turn = require_open_turn(conn, campaign_id)
+    turn_id = safe_int(turn["id"], "turn_id")
+
+    source_type = str(payload.get("source_type", "manual"))
+    source_id = str(payload.get("source_id", ""))
+    grants = normalize_reward_grants(conn, campaign_id, payload)
+    reward_events = apply_reward_grants(conn, campaign_id, turn_id, source_type, source_id, grants)
+
+    persist_event(
+        conn,
+        campaign_id,
+        turn_id,
+        "reward grant",
+        {"reward_event_ids": [event["id"] for event in reward_events], "source_type": source_type, "source_id": source_id},
+    )
+    conn.commit()
+    conn.close()
+    return (
+        {
+            "campaign": campaign_id,
+            "turn_id": turn_id,
+            "source_type": source_type,
+            "source_id": source_id,
+            "reward_events": reward_events,
+        },
+        [],
+    )
+
+
+def command_reward_history(args: argparse.Namespace, payload: Dict[str, Any]) -> Tuple[Dict[str, Any], List[str]]:
+    campaign_id = require_campaign(args.campaign)
+    limit = max(1, safe_int(payload.get("limit", 20), "limit"))
+    conn = connect_campaign_db(campaign_id)
+    rows = to_jsonable(
+        conn.execute(
+            """
+            SELECT *
+            FROM reward_events
+            WHERE campaign_id = ?
+            ORDER BY created_at DESC
+            LIMIT ?
+            """,
+            (campaign_id, limit),
+        )
+    )
+    conn.close()
+    history = []
+    for row in rows:
+        parsed = dict(row)
+        parsed["reward"] = json_load(row.get("reward_json"), {})
+        parsed.pop("reward_json", None)
+        history.append(parsed)
+    return ({"campaign": campaign_id, "count": len(history), "history": history}, [])
+
+
+def command_agenda_upsert(args: argparse.Namespace, payload: Dict[str, Any]) -> Tuple[Dict[str, Any], List[str]]:
+    campaign_id = require_campaign(args.campaign)
+    conn = connect_campaign_db(campaign_id)
+    turn = require_open_turn(conn, campaign_id)
+    turn_id = safe_int(turn["id"], "turn_id")
+    ts = now_iso()
+
+    agenda_id = payload.get("agenda_id") or payload.get("id")
+    name = payload.get("name")
+    effect_type = payload.get("effect_type")
+
+    existing = None
+    if agenda_id:
+        existing = conn.execute(
+            "SELECT * FROM agenda_rules WHERE campaign_id = ? AND id = ?",
+            (campaign_id, agenda_id),
+        ).fetchone()
+    elif name:
+        existing = conn.execute(
+            "SELECT * FROM agenda_rules WHERE campaign_id = ? AND name = ?",
+            (campaign_id, name),
+        ).fetchone()
+
+    if existing is None:
+        if not name or not effect_type:
+            raise DMError(
+                "invalid_agenda_payload",
+                {"required": ["name", "effect_type"], "provided": sorted(payload.keys())},
+            )
+        agenda_id = agenda_id or uuid_id("agenda")
+        conn.execute(
+            """
+            INSERT INTO agenda_rules (
+                id, campaign_id, name, effect_type, target_type, target_id,
+                payload_json, cadence_turns, last_applied_turn, enabled, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?)
+            """,
+            (
+                agenda_id,
+                campaign_id,
+                str(name),
+                str(effect_type),
+                str(payload.get("target_type", "")),
+                str(payload.get("target_id", "")),
+                json.dumps(payload.get("payload", {}), separators=(",", ":")),
+                max(1, safe_int(payload.get("cadence_turns", 1), "cadence_turns")),
+                1 if payload.get("enabled", True) else 0,
+                ts,
+                ts,
+            ),
+        )
+    else:
+        agenda_id = str(existing["id"])
+        updates: List[str] = []
+        values: List[Any] = []
+        for key in ["name", "effect_type", "target_type", "target_id"]:
+            if key in payload:
+                updates.append(f"{key} = ?")
+                values.append(str(payload[key]))
+        if "payload" in payload:
+            updates.append("payload_json = ?")
+            values.append(json.dumps(payload.get("payload", {}), separators=(",", ":")))
+        if "cadence_turns" in payload:
+            updates.append("cadence_turns = ?")
+            values.append(max(1, safe_int(payload["cadence_turns"], "cadence_turns")))
+        if "enabled" in payload:
+            updates.append("enabled = ?")
+            values.append(1 if payload.get("enabled") else 0)
+        if payload.get("reset_cadence", False):
+            updates.append("last_applied_turn = NULL")
+        if not updates:
+            updates.append("name = name")
+        updates.append("updated_at = ?")
+        values.append(ts)
+        values.extend([campaign_id, agenda_id])
+        conn.execute(
+            f"UPDATE agenda_rules SET {', '.join(updates)} WHERE campaign_id = ? AND id = ?",
+            tuple(values),
+        )
+
+    rule = conn.execute(
+        "SELECT * FROM agenda_rules WHERE campaign_id = ? AND id = ?",
+        (campaign_id, agenda_id),
+    ).fetchone()
+    persist_event(conn, campaign_id, turn_id, "agenda upsert", {"agenda_id": agenda_id, "payload": payload})
+    conn.commit()
+    conn.close()
+    output = as_dict(rule)
+    output["payload"] = json_load(output.get("payload_json"), {})
+    output.pop("payload_json", None)
+    return ({"turn_id": turn_id, "agenda": output}, [])
+
+
+def command_agenda_list(args: argparse.Namespace, payload: Dict[str, Any]) -> Tuple[Dict[str, Any], List[str]]:
+    campaign_id = require_campaign(args.campaign)
+    enabled_only = bool(payload.get("enabled_only", False))
+    conn = connect_campaign_db(campaign_id)
+    query = "SELECT * FROM agenda_rules WHERE campaign_id = ?"
+    params: List[Any] = [campaign_id]
+    if enabled_only:
+        query += " AND enabled = 1"
+    query += " ORDER BY created_at, id"
+    rows = to_jsonable(conn.execute(query, tuple(params)))
+    conn.close()
+    agendas = []
+    for row in rows:
+        parsed = dict(row)
+        parsed["payload"] = json_load(row.get("payload_json"), {})
+        parsed.pop("payload_json", None)
+        agendas.append(parsed)
+    return ({"campaign": campaign_id, "count": len(agendas), "agendas": agendas}, [])
+
+
+def command_agenda_disable(args: argparse.Namespace, payload: Dict[str, Any]) -> Tuple[Dict[str, Any], List[str]]:
+    campaign_id = require_campaign(args.campaign)
+    agenda_id = payload.get("agenda_id") or payload.get("id")
+    name = payload.get("name")
+    if not agenda_id and not name:
+        raise DMError("agenda_identity_required", {"required": ["agenda_id", "name"]})
+
+    conn = connect_campaign_db(campaign_id)
+    turn = require_open_turn(conn, campaign_id)
+    turn_id = safe_int(turn["id"], "turn_id")
+
+    if agenda_id:
+        row = conn.execute(
+            "SELECT * FROM agenda_rules WHERE campaign_id = ? AND id = ?",
+            (campaign_id, agenda_id),
+        ).fetchone()
+    else:
+        row = conn.execute(
+            "SELECT * FROM agenda_rules WHERE campaign_id = ? AND name = ?",
+            (campaign_id, name),
+        ).fetchone()
+    if row is None:
+        raise DMError("agenda_not_found", {"campaign": campaign_id, "agenda_id": agenda_id, "name": name})
+
+    agenda_id = str(row["id"])
+    conn.execute(
+        "UPDATE agenda_rules SET enabled = 0, updated_at = ? WHERE campaign_id = ? AND id = ?",
+        (now_iso(), campaign_id, agenda_id),
+    )
+    persist_event(conn, campaign_id, turn_id, "agenda disable", {"agenda_id": agenda_id})
+    conn.commit()
+    updated = conn.execute("SELECT * FROM agenda_rules WHERE campaign_id = ? AND id = ?", (campaign_id, agenda_id)).fetchone()
+    conn.close()
+    output = as_dict(updated)
+    output["payload"] = json_load(output.get("payload_json"), {})
+    output.pop("payload_json", None)
+    return ({"turn_id": turn_id, "agenda": output}, [])
 
 
 def command_rumor_add(args: argparse.Namespace, payload: Dict[str, Any]) -> Tuple[Dict[str, Any], List[str]]:
@@ -3559,6 +4354,7 @@ def command_world_pulse(args: argparse.Namespace, payload: Dict[str, Any]) -> Tu
     conn = connect_campaign_db(campaign_id)
     turn = require_open_turn(conn, campaign_id)
     turn_id = safe_int(turn["id"], "turn_id")
+    turn_number = safe_int(turn["turn_number"], "turn_number")
 
     summary: Dict[str, Any] = {
         "time_advance": {},
@@ -3568,6 +4364,8 @@ def command_world_pulse(args: argparse.Namespace, payload: Dict[str, Any]) -> Tu
         "secret_reveals": 0,
         "hooks_added": 0,
         "hooks_removed": 0,
+        "agenda_rules_applied": 0,
+        "agenda_effects": [],
     }
 
     hours = safe_int(payload.get("hours", 0), "hours")
@@ -3695,6 +4493,164 @@ def command_world_pulse(args: argparse.Namespace, payload: Dict[str, Any]) -> Tu
         if item in hooks:
             hooks = [entry for entry in hooks if entry != item]
             summary["hooks_removed"] += 1
+
+    agenda_rows = to_jsonable(
+        conn.execute(
+            "SELECT * FROM agenda_rules WHERE campaign_id = ? AND enabled = 1 ORDER BY created_at, id",
+            (campaign_id,),
+        )
+    )
+    for rule in agenda_rows:
+        cadence_turns = max(1, safe_int(rule.get("cadence_turns", 1), "cadence_turns"))
+        last_applied_turn = rule.get("last_applied_turn")
+        if last_applied_turn is not None:
+            try:
+                if (turn_number - safe_int(last_applied_turn, "last_applied_turn")) < cadence_turns:
+                    continue
+            except DMError:
+                pass
+
+        agenda_payload = json_load(rule.get("payload_json"), {})
+        if not isinstance(agenda_payload, dict):
+            agenda_payload = {}
+        effect_type = str(rule.get("effect_type", "")).strip()
+        applied = False
+
+        if effect_type == "clock_tick":
+            tick_amount = max(0, safe_int(agenda_payload.get("amount", 1), "amount"))
+            if tick_amount > 0:
+                clock_id = agenda_payload.get("clock_id") or (rule["target_id"] if str(rule.get("target_type")) == "clock" else None)
+                clock_name = agenda_payload.get("name")
+                row: Optional[sqlite3.Row]
+                if clock_id:
+                    row = conn.execute(
+                        "SELECT * FROM clocks WHERE campaign_id = ? AND id = ?",
+                        (campaign_id, clock_id),
+                    ).fetchone()
+                else:
+                    row = conn.execute(
+                        "SELECT * FROM clocks WHERE campaign_id = ? AND name = ?",
+                        (campaign_id, clock_name),
+                    ).fetchone()
+                ts = now_iso()
+                if row is None:
+                    new_clock_id = str(clock_id or uuid_id("clock"))
+                    max_segments = safe_int(agenda_payload.get("max_segments", 4), "max_segments")
+                    current = min(tick_amount, max_segments)
+                    status = "complete" if current >= max_segments else "active"
+                    conn.execute(
+                        """
+                        INSERT INTO clocks (id, campaign_id, name, current_segments, max_segments, status, scope, updated_at)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        (
+                            new_clock_id,
+                            campaign_id,
+                            str(clock_name or rule.get("name") or f"Clock {new_clock_id}"),
+                            current,
+                            max_segments,
+                            status,
+                            str(agenda_payload.get("scope", "local")),
+                            ts,
+                        ),
+                    )
+                else:
+                    max_segments = safe_int(row["max_segments"], "max_segments")
+                    current = min(max_segments, safe_int(row["current_segments"], "current_segments") + tick_amount)
+                    status = "complete" if current >= max_segments else str(row["status"])
+                    conn.execute(
+                        "UPDATE clocks SET current_segments = ?, status = ?, updated_at = ? WHERE id = ?",
+                        (current, status, ts, row["id"]),
+                    )
+                summary["clock_ticks"] += 1
+                applied = True
+        elif effect_type == "faction_drift":
+            faction_id = agenda_payload.get("faction_id") or (rule["target_id"] if str(rule.get("target_type")) == "faction" else None)
+            faction_name = agenda_payload.get("name")
+            row = None
+            if faction_id:
+                row = conn.execute(
+                    "SELECT id FROM factions WHERE campaign_id = ? AND id = ?",
+                    (campaign_id, faction_id),
+                ).fetchone()
+            elif faction_name:
+                row = conn.execute(
+                    "SELECT id FROM factions WHERE campaign_id = ? AND name = ?",
+                    (campaign_id, faction_name),
+                ).fetchone()
+            if row is not None:
+                conn.execute(
+                    """
+                    UPDATE factions
+                    SET trust = trust + ?, fear = fear + ?, debt = debt + ?, reputation = reputation + ?, updated_at = ?
+                    WHERE id = ?
+                    """,
+                    (
+                        safe_int(agenda_payload.get("trust_delta", 0), "trust_delta"),
+                        safe_int(agenda_payload.get("fear_delta", 0), "fear_delta"),
+                        safe_int(agenda_payload.get("debt_delta", 0), "debt_delta"),
+                        safe_int(agenda_payload.get("reputation_delta", 0), "reputation_delta"),
+                        now_iso(),
+                        row["id"],
+                    ),
+                )
+                summary["faction_updates"] += 1
+                applied = True
+        elif effect_type == "hook_add":
+            rule_hooks = agenda_payload.get("hooks")
+            if rule_hooks is None:
+                single_hook = agenda_payload.get("hook") or rule.get("target_id")
+                rule_hooks = [single_hook] if single_hook else []
+            if not isinstance(rule_hooks, list):
+                rule_hooks = [str(rule_hooks)]
+            for hook in rule_hooks:
+                hook_text = str(hook)
+                if hook_text and hook_text not in hooks:
+                    hooks.append(hook_text)
+                    summary["hooks_added"] += 1
+                    applied = True
+        elif effect_type == "rumor_shift":
+            rumor_id = agenda_payload.get("rumor_id") or (rule["target_id"] if str(rule.get("target_type")) == "rumor" else None)
+            if rumor_id:
+                rumor_row = conn.execute(
+                    "SELECT id, spread_level, decay FROM rumors WHERE campaign_id = ? AND id = ?",
+                    (campaign_id, rumor_id),
+                ).fetchone()
+                if rumor_row is not None:
+                    spread_delta = safe_int(agenda_payload.get("spread_delta", 0), "spread_delta")
+                    decay_delta = safe_int(agenda_payload.get("decay_delta", 0), "decay_delta")
+                    next_spread = max(0, safe_int(rumor_row["spread_level"], "spread_level") + spread_delta)
+                    next_decay = max(0, safe_int(rumor_row["decay"], "decay") + decay_delta)
+                    conn.execute(
+                        "UPDATE rumors SET spread_level = ?, decay = ?, updated_at = ? WHERE id = ?",
+                        (next_spread, next_decay, now_iso(), rumor_id),
+                    )
+                    summary["rumor_updates"] += 1
+                    applied = True
+        elif effect_type == "world_pressure":
+            legal_heat_delta = safe_int(agenda_payload.get("legal_heat_delta", 0), "legal_heat_delta")
+            notoriety_delta = safe_int(agenda_payload.get("notoriety_delta", 0), "notoriety_delta")
+            if legal_heat_delta or notoriety_delta:
+                conn.execute(
+                    """
+                    UPDATE world_state
+                    SET legal_heat = legal_heat + ?, notoriety = notoriety + ?, updated_at = ?
+                    WHERE campaign_id = ?
+                    """,
+                    (legal_heat_delta, notoriety_delta, now_iso(), campaign_id),
+                )
+                applied = True
+
+        if applied:
+            conn.execute(
+                "UPDATE agenda_rules SET last_applied_turn = ?, updated_at = ? WHERE campaign_id = ? AND id = ?",
+                (turn_number, now_iso(), campaign_id, rule["id"]),
+            )
+            summary["agenda_rules_applied"] += 1
+            summary["agenda_effects"].append(
+                {"agenda_id": rule["id"], "name": rule["name"], "effect_type": effect_type}
+            )
+
     conn.execute(
         "UPDATE world_state SET unresolved_hooks_json = ?, updated_at = ? WHERE campaign_id = ?",
         (json.dumps(hooks, separators=(",", ":")), now_iso(), campaign_id),
@@ -3851,6 +4807,7 @@ def command_travel_resolve(args: argparse.Namespace, payload: Dict[str, Any]) ->
     conn = connect_campaign_db(campaign_id)
     turn = require_open_turn(conn, campaign_id)
     turn_id = safe_int(turn["id"], "turn_id")
+    warnings: List[str] = []
 
     route = None
     route_id = payload.get("route_id")
@@ -3883,6 +4840,9 @@ def command_travel_resolve(args: argparse.Namespace, payload: Dict[str, Any]) ->
     travel_hours_int = safe_int(travel_hours, "travel_hours")
     if travel_hours_int < 0:
         raise DMError("invalid_travel_hours", {"travel_hours": travel_hours_int})
+    ration_shortage_policy = str(payload.get("ration_shortage_policy", "soft")).lower()
+    if ration_shortage_policy not in {"soft", "strict"}:
+        raise DMError("invalid_ration_shortage_policy", {"ration_shortage_policy": ration_shortage_policy})
 
     time_advance = advance_world_state_time(conn, campaign_id, hours=travel_hours_int, minutes=0)
     conn.execute(
@@ -3904,18 +4864,88 @@ def command_travel_resolve(args: argparse.Namespace, payload: Dict[str, Any]) ->
         )
 
     consumed_rations = 0
+    ration_shortages = 0
+    shortage_pc_ids: List[str] = []
+    pressure_clock: Dict[str, Any] = {}
     if payload.get("consume_rations"):
         ration_name = str(payload.get("ration_item_name", "Rations"))
         pcs = to_jsonable(
             conn.execute(
-                "SELECT id FROM player_characters WHERE campaign_id = ? AND is_active = 1",
+                "SELECT id, exhaustion FROM player_characters WHERE campaign_id = ? AND is_active = 1",
                 (campaign_id,),
             )
         )
         item_id = ensure_item(conn, campaign_id, payload.get("ration_item_id"), ration_name, {"stackable": True, "consumable": True})
         for pc in pcs:
-            upsert_inventory_quantity(conn, campaign_id, "pc", pc["id"], item_id, -1)
-            consumed_rations += 1
+            try:
+                upsert_inventory_quantity(conn, campaign_id, "pc", pc["id"], item_id, -1)
+                consumed_rations += 1
+            except DMError as exc:
+                if str(exc) != "insufficient_inventory" or ration_shortage_policy == "strict":
+                    raise
+                pc_id = str(pc["id"])
+                shortage_pc_ids.append(pc_id)
+                ration_shortages += 1
+                updated_exhaustion = min(6, safe_int(pc.get("exhaustion", 0), "exhaustion") + 1)
+                conn.execute(
+                    "UPDATE player_characters SET exhaustion = ?, updated_at = ? WHERE campaign_id = ? AND id = ?",
+                    (updated_exhaustion, now_iso(), campaign_id, pc_id),
+                )
+
+        if ration_shortages > 0 and ration_shortage_policy == "soft":
+            warnings.append("ration shortage detected; applied exhaustion and pressure instead of failing travel")
+            shortage_hook = f"Ration shortages affected {ration_shortages} traveler(s) during this route."
+            ws_row = conn.execute(
+                "SELECT unresolved_hooks_json FROM world_state WHERE campaign_id = ?",
+                (campaign_id,),
+            ).fetchone()
+            hooks = json_load(ws_row["unresolved_hooks_json"] if ws_row else "[]", [])
+            if shortage_hook not in hooks:
+                hooks.append(shortage_hook)
+            conn.execute(
+                "UPDATE world_state SET unresolved_hooks_json = ?, updated_at = ? WHERE campaign_id = ?",
+                (json.dumps(hooks, separators=(",", ":")), now_iso(), campaign_id),
+            )
+            pressure_name = str(payload.get("ration_pressure_clock_name", "Supply Pressure"))
+            clock_row = conn.execute(
+                "SELECT * FROM clocks WHERE campaign_id = ? AND name = ?",
+                (campaign_id, pressure_name),
+            ).fetchone()
+            ts = now_iso()
+            if clock_row is None:
+                new_clock_id = uuid_id("clock")
+                max_segments = max(1, safe_int(payload.get("ration_pressure_max_segments", 6), "ration_pressure_max_segments"))
+                current = min(ration_shortages, max_segments)
+                status = "complete" if current >= max_segments else "active"
+                conn.execute(
+                    """
+                    INSERT INTO clocks (id, campaign_id, name, current_segments, max_segments, status, scope, updated_at)
+                    VALUES (?, ?, ?, ?, ?, ?, 'local', ?)
+                    """,
+                    (new_clock_id, campaign_id, pressure_name, current, max_segments, status, ts),
+                )
+                pressure_clock = {
+                    "id": new_clock_id,
+                    "name": pressure_name,
+                    "current_segments": current,
+                    "max_segments": max_segments,
+                    "status": status,
+                }
+            else:
+                max_segments = safe_int(clock_row["max_segments"], "max_segments")
+                current = min(max_segments, safe_int(clock_row["current_segments"], "current_segments") + ration_shortages)
+                status = "complete" if current >= max_segments else str(clock_row["status"])
+                conn.execute(
+                    "UPDATE clocks SET current_segments = ?, status = ?, updated_at = ? WHERE id = ?",
+                    (current, status, ts, clock_row["id"]),
+                )
+                pressure_clock = {
+                    "id": clock_row["id"],
+                    "name": pressure_name,
+                    "current_segments": current,
+                    "max_segments": max_segments,
+                    "status": status,
+                }
 
     persist_event(
         conn,
@@ -3928,6 +4958,9 @@ def command_travel_resolve(args: argparse.Namespace, payload: Dict[str, Any]) ->
             "travel_hours": travel_hours_int,
             "time_advance": time_advance,
             "consumed_rations": consumed_rations,
+            "ration_shortage_policy": ration_shortage_policy,
+            "ration_shortages": ration_shortages,
+            "shortage_pc_ids": shortage_pc_ids,
         },
     )
     conn.commit()
@@ -3940,8 +4973,12 @@ def command_travel_resolve(args: argparse.Namespace, payload: Dict[str, Any]) ->
             "travel_hours": travel_hours_int,
             "time_advance": time_advance,
             "consumed_rations": consumed_rations,
+            "ration_shortage_policy": ration_shortage_policy,
+            "ration_shortages": ration_shortages,
+            "shortage_pc_ids": shortage_pc_ids,
+            "pressure_clock": pressure_clock,
         },
-        [],
+        warnings,
     )
 
 
@@ -4103,6 +5140,96 @@ def command_spell_end(args: argparse.Namespace, payload: Dict[str, Any]) -> Tupl
     )
 
 
+def fetch_recent_rewards(
+    conn: sqlite3.Connection,
+    campaign_id: str,
+    *,
+    limit: int = 10,
+) -> List[Dict[str, Any]]:
+    rows = to_jsonable(
+        conn.execute(
+            """
+            SELECT id, turn_id, source_type, source_id, recipient_type, recipient_id, reward_json, created_at
+            FROM reward_events
+            WHERE campaign_id = ?
+            ORDER BY created_at DESC
+            LIMIT ?
+            """,
+            (campaign_id, max(1, limit)),
+        )
+    )
+    rewards: List[Dict[str, Any]] = []
+    for row in rows:
+        parsed = dict(row)
+        parsed["reward"] = json_load(row.get("reward_json"), {})
+        parsed.pop("reward_json", None)
+        rewards.append(parsed)
+    return rewards
+
+
+def fetch_active_pressures(conn: sqlite3.Connection, campaign_id: str) -> Dict[str, Any]:
+    world = conn.execute(
+        "SELECT legal_heat, notoriety FROM world_state WHERE campaign_id = ?",
+        (campaign_id,),
+    ).fetchone()
+    clocks = to_jsonable(
+        conn.execute(
+            """
+            SELECT id, name, current_segments, max_segments, status
+            FROM clocks
+            WHERE campaign_id = ? AND status = 'active'
+            ORDER BY CAST(current_segments AS REAL) / NULLIF(max_segments, 0) DESC, updated_at DESC
+            LIMIT 10
+            """,
+            (campaign_id,),
+        )
+    )
+    agenda = to_jsonable(
+        conn.execute(
+            """
+            SELECT id, name, effect_type, cadence_turns, last_applied_turn, enabled
+            FROM agenda_rules
+            WHERE campaign_id = ? AND enabled = 1
+            ORDER BY updated_at DESC
+            LIMIT 10
+            """,
+            (campaign_id,),
+        )
+    )
+    return {
+        "legal_heat": safe_int(world["legal_heat"], "legal_heat") if world else 0,
+        "notoriety": safe_int(world["notoriety"], "notoriety") if world else 0,
+        "clocks": clocks,
+        "agenda_rules": agenda,
+    }
+
+
+def fetch_next_payoff_hooks(conn: sqlite3.Connection, campaign_id: str, *, limit: int = 8) -> List[str]:
+    ws_row = conn.execute(
+        "SELECT unresolved_hooks_json FROM world_state WHERE campaign_id = ?",
+        (campaign_id,),
+    ).fetchone()
+    hooks = [str(item) for item in json_load(ws_row["unresolved_hooks_json"] if ws_row else "[]", [])]
+    near_complete = to_jsonable(
+        conn.execute(
+            """
+            SELECT name, current_segments, max_segments
+            FROM clocks
+            WHERE campaign_id = ? AND status = 'active' AND current_segments >= max_segments - 1
+            ORDER BY updated_at DESC
+            """,
+            (campaign_id,),
+        )
+    )
+    for clock in near_complete:
+        hooks.append(f"Clock near completion: {clock['name']} ({clock['current_segments']}/{clock['max_segments']})")
+    seen: List[str] = []
+    for item in hooks:
+        if item and item not in seen:
+            seen.append(item)
+    return seen[: max(1, limit)]
+
+
 def command_ooc(args: argparse.Namespace, payload: Dict[str, Any]) -> Tuple[Dict[str, Any], List[str]]:
     campaign_id = require_campaign(args.campaign)
     action = args.action
@@ -4259,6 +5386,13 @@ def command_ooc(args: argparse.Namespace, payload: Dict[str, Any]) -> Tuple[Dict
             "SELECT turn_id, turn_number, diff_json, created_at FROM turn_diffs WHERE campaign_id = ? ORDER BY created_at DESC LIMIT 1",
             (campaign_id,),
         ).fetchone()
+        recent_rewards = fetch_recent_rewards(conn, campaign_id, limit=max(1, safe_int(payload.get("rewards_limit", 5), "rewards_limit")))
+        active_pressures = fetch_active_pressures(conn, campaign_id)
+        next_payoff_hooks = fetch_next_payoff_hooks(
+            conn,
+            campaign_id,
+            limit=max(1, safe_int(payload.get("hooks_limit", 8), "hooks_limit")),
+        )
         conn.close()
         return (
             {
@@ -4266,6 +5400,9 @@ def command_ooc(args: argparse.Namespace, payload: Dict[str, Any]) -> Tuple[Dict
                 "open_turn": as_dict(open_turn),
                 "active_encounter": as_dict(active_encounter),
                 "counts": as_dict(counts),
+                "recent_rewards": recent_rewards,
+                "active_pressures": active_pressures,
+                "next_payoff_hooks": next_payoff_hooks,
                 "latest_turn_diff": {
                     "turn_id": latest_diff["turn_id"],
                     "turn_number": latest_diff["turn_number"],
@@ -4842,6 +5979,244 @@ def command_combat_act(args: argparse.Namespace, payload: Dict[str, Any]) -> Tup
     )
 
 
+def command_combat_resolve(args: argparse.Namespace, payload: Dict[str, Any]) -> Tuple[Dict[str, Any], List[str]]:
+    campaign_id = require_campaign(args.campaign)
+    mode = str(payload.get("mode", "attack")).lower()
+    if mode not in {"attack", "save"}:
+        raise DMError("invalid_combat_resolve_mode", {"mode": mode})
+
+    conn = connect_campaign_db(campaign_id)
+    turn = require_open_turn(conn, campaign_id)
+    encounter_id = payload.get("encounter_id")
+    encounter = None
+    if encounter_id:
+        encounter = conn.execute(
+            "SELECT * FROM encounters WHERE campaign_id = ? AND id = ? AND status = 'active'",
+            (campaign_id, encounter_id),
+        ).fetchone()
+    else:
+        encounter = get_active_encounter(conn, campaign_id)
+    if encounter is None:
+        raise DMError("no_active_combat", {"campaign": campaign_id})
+    encounter_id = str(encounter["id"])
+    combatants = get_encounter_combatants(conn, encounter_id)
+    if not combatants:
+        raise DMError("combatant_list_empty", {"encounter_id": encounter_id})
+    current_index = safe_int(encounter["current_turn_index"], "current_turn_index")
+    if current_index >= len(combatants):
+        current_index = 0
+    current_actor = combatants[current_index]
+    acting_id = str(payload.get("combatant_id") or current_actor["id"])
+    acting_row = conn.execute(
+        "SELECT * FROM combatants WHERE encounter_id = ? AND id = ?",
+        (encounter_id, acting_id),
+    ).fetchone()
+    if acting_row is None:
+        raise DMError("combatant_not_found", {"encounter_id": encounter_id, "combatant_id": acting_id})
+
+    target_id = payload.get("target_id")
+    if not target_id:
+        raise DMError("combat_target_required", {"required": ["target_id"]})
+    target_row = conn.execute(
+        "SELECT * FROM combatants WHERE encounter_id = ? AND id = ?",
+        (encounter_id, target_id),
+    ).fetchone()
+    if target_row is None:
+        raise DMError("combat_target_not_found", {"encounter_id": encounter_id, "target_id": target_id})
+    conn.close()
+
+    resolution: Dict[str, Any] = {
+        "mode": mode,
+        "encounter_id": encounter_id,
+        "acting_combatant_id": acting_id,
+        "target_id": target_id,
+    }
+    rolls: List[Dict[str, Any]] = []
+    damage_to_apply = 0
+
+    if mode == "attack":
+        attack_bonus = safe_int(payload.get("attack_bonus", 0), "attack_bonus")
+        attack_formula = str(
+            payload.get(
+                "attack_formula",
+                f"1d20{f'+{attack_bonus}' if attack_bonus > 0 else (str(attack_bonus) if attack_bonus < 0 else '')}",
+            )
+        )
+        attack_roll_payload = {
+            "campaign": campaign_id,
+            "formula": attack_formula,
+            "context": payload.get("attack_context", f"combat_resolve_attack:{encounter_id}:{acting_id}->{target_id}"),
+            "advantage": bool(payload.get("advantage", False)),
+            "disadvantage": bool(payload.get("disadvantage", False)),
+        }
+        attack_roll, attack_warnings = command_dice_roll(args, attack_roll_payload)
+        natural = abs(safe_int((attack_roll.get("selected_dice") or [0])[0], "attack_natural"))
+        target_ac = safe_int(payload.get("target_ac", target_row["ac"]), "target_ac")
+        critical_threshold = max(2, safe_int(payload.get("critical_threshold", 20), "critical_threshold"))
+        attack_total = safe_int(attack_roll["total"], "attack_total")
+        hit = natural == 20 or (natural != 1 and attack_total >= target_ac)
+        critical = hit and natural >= critical_threshold
+
+        rolls.append({"kind": "attack", "result": attack_roll})
+        damage_formula = payload.get("damage_formula")
+        miss_damage_formula = payload.get("on_miss_damage_formula")
+        damage_roll = None
+        if hit and damage_formula:
+            resolved_formula = str(damage_formula)
+            if critical:
+                resolved_formula = critical_damage_formula(resolved_formula)
+            damage_roll_payload = {
+                "campaign": campaign_id,
+                "formula": resolved_formula,
+                "context": payload.get("damage_context", f"combat_resolve_damage:{encounter_id}:{acting_id}->{target_id}"),
+            }
+            damage_roll, _ = command_dice_roll(args, damage_roll_payload)
+            damage_to_apply = max(0, safe_int(damage_roll["total"], "damage_total"))
+            rolls.append({"kind": "damage", "result": damage_roll})
+        elif not hit and miss_damage_formula:
+            miss_roll_payload = {
+                "campaign": campaign_id,
+                "formula": str(miss_damage_formula),
+                "context": payload.get("damage_context", f"combat_resolve_miss_damage:{encounter_id}:{acting_id}->{target_id}"),
+            }
+            damage_roll, _ = command_dice_roll(args, miss_roll_payload)
+            damage_to_apply = max(0, safe_int(damage_roll["total"], "damage_total"))
+            rolls.append({"kind": "damage_on_miss", "result": damage_roll})
+
+        action_payload = {
+            "encounter_id": encounter_id,
+            "combatant_id": acting_id,
+            "action": payload.get("action", f"{acting_row['name']} resolves an attack against {target_row['name']}"),
+            "action_type": payload.get("action_type", "attack"),
+            "target_id": target_id,
+            "damage": damage_to_apply,
+            "healing": safe_int(payload.get("healing", 0), "healing"),
+            "reaction": bool(payload.get("reaction", False)),
+            "bonus_action": bool(payload.get("bonus_action", False)),
+            "use_action": bool(payload.get("use_action", True)),
+            "movement_ft": safe_int(payload.get("movement_ft", 0), "movement_ft"),
+            "end_turn": bool(payload.get("end_turn", True)),
+            "break_concentration": bool(payload.get("break_concentration", False)) and bool(hit),
+            "concentration_check": payload.get("concentration_check"),
+            "spell_slot_changes": payload.get("spell_slot_changes", []),
+            "inventory_changes": payload.get("inventory_changes", []),
+            "death_save": payload.get("death_save"),
+        }
+        if hit and payload.get("add_condition"):
+            action_payload["add_condition"] = payload.get("add_condition")
+            action_payload["condition_duration_rounds"] = safe_int(payload.get("condition_duration_rounds", 0), "condition_duration_rounds")
+            action_payload["condition_source"] = payload.get("condition_source", action_payload["action"])
+
+        action_result, action_warnings = command_combat_act(args, action_payload)
+        resolution.update(
+            {
+                "hit": hit,
+                "critical": critical,
+                "natural": natural,
+                "target_ac": target_ac,
+                "attack_total": attack_total,
+                "damage_applied": damage_to_apply,
+                "attack_warnings": attack_warnings,
+            }
+        )
+        action_result["resolution"] = resolution
+        action_result["rolls"] = rolls
+        return (action_result, action_warnings)
+
+    save_dc = safe_int(payload.get("save_dc"), "save_dc")
+    save_bonus = safe_int(payload.get("save_bonus", 0), "save_bonus")
+    save_formula = str(
+        payload.get(
+            "save_formula",
+            f"1d20{f'+{save_bonus}' if save_bonus > 0 else (str(save_bonus) if save_bonus < 0 else '')}",
+        )
+    )
+    save_roll_payload = {
+        "campaign": campaign_id,
+        "formula": save_formula,
+        "context": payload.get("save_context", f"combat_resolve_save:{encounter_id}:{target_id}"),
+        "advantage": bool(payload.get("save_advantage", False)),
+        "disadvantage": bool(payload.get("save_disadvantage", False)),
+    }
+    save_roll, save_warnings = command_dice_roll(args, save_roll_payload)
+    save_total = safe_int(save_roll["total"], "save_total")
+    save_success = save_total >= save_dc
+    rolls.append({"kind": "save", "result": save_roll})
+
+    fail_damage_formula = payload.get("on_fail_damage_formula") or payload.get("damage_formula")
+    success_damage_formula = payload.get("on_success_damage_formula")
+    half_on_success = bool(payload.get("half_on_success", False))
+    damage_roll_result = None
+
+    if save_success:
+        if success_damage_formula:
+            damage_roll_payload = {
+                "campaign": campaign_id,
+                "formula": str(success_damage_formula),
+                "context": payload.get("damage_context", f"combat_resolve_save_success_damage:{encounter_id}:{target_id}"),
+            }
+            damage_roll_result, _ = command_dice_roll(args, damage_roll_payload)
+            damage_to_apply = max(0, safe_int(damage_roll_result["total"], "damage_total"))
+            rolls.append({"kind": "damage_on_success", "result": damage_roll_result})
+        elif half_on_success and fail_damage_formula:
+            damage_roll_payload = {
+                "campaign": campaign_id,
+                "formula": str(fail_damage_formula),
+                "context": payload.get("damage_context", f"combat_resolve_save_half_damage:{encounter_id}:{target_id}"),
+            }
+            damage_roll_result, _ = command_dice_roll(args, damage_roll_payload)
+            full_damage = max(0, safe_int(damage_roll_result["total"], "damage_total"))
+            damage_to_apply = full_damage // 2
+            rolls.append({"kind": "damage_half_on_success", "result": {**damage_roll_result, "half_damage": damage_to_apply}})
+    elif fail_damage_formula:
+        damage_roll_payload = {
+            "campaign": campaign_id,
+            "formula": str(fail_damage_formula),
+            "context": payload.get("damage_context", f"combat_resolve_save_fail_damage:{encounter_id}:{target_id}"),
+        }
+        damage_roll_result, _ = command_dice_roll(args, damage_roll_payload)
+        damage_to_apply = max(0, safe_int(damage_roll_result["total"], "damage_total"))
+        rolls.append({"kind": "damage_on_fail", "result": damage_roll_result})
+
+    action_payload = {
+        "encounter_id": encounter_id,
+        "combatant_id": acting_id,
+        "action": payload.get("action", f"{target_row['name']} resolves a saving throw against DC {save_dc}"),
+        "action_type": payload.get("action_type", "save"),
+        "target_id": target_id,
+        "damage": damage_to_apply,
+        "healing": safe_int(payload.get("healing", 0), "healing"),
+        "reaction": bool(payload.get("reaction", False)),
+        "bonus_action": bool(payload.get("bonus_action", False)),
+        "use_action": bool(payload.get("use_action", True)),
+        "movement_ft": safe_int(payload.get("movement_ft", 0), "movement_ft"),
+        "end_turn": bool(payload.get("end_turn", True)),
+        "break_concentration": bool(payload.get("break_concentration", False)) and bool(not save_success),
+        "concentration_check": payload.get("concentration_check"),
+        "spell_slot_changes": payload.get("spell_slot_changes", []),
+        "inventory_changes": payload.get("inventory_changes", []),
+        "death_save": payload.get("death_save"),
+    }
+    if not save_success and payload.get("add_condition_on_fail"):
+        action_payload["add_condition"] = payload.get("add_condition_on_fail")
+        action_payload["condition_duration_rounds"] = safe_int(payload.get("condition_duration_rounds", 0), "condition_duration_rounds")
+        action_payload["condition_source"] = payload.get("condition_source", action_payload["action"])
+
+    action_result, action_warnings = command_combat_act(args, action_payload)
+    resolution.update(
+        {
+            "save_dc": save_dc,
+            "save_total": save_total,
+            "save_success": save_success,
+            "damage_applied": damage_to_apply,
+            "save_warnings": save_warnings,
+        }
+    )
+    action_result["resolution"] = resolution
+    action_result["rolls"] = rolls
+    return (action_result, action_warnings)
+
+
 def command_combat_end(args: argparse.Namespace, payload: Dict[str, Any]) -> Tuple[Dict[str, Any], List[str]]:
     campaign_id = require_campaign(args.campaign)
 
@@ -4962,6 +6337,9 @@ def command_recap_generate(args: argparse.Namespace, payload: Dict[str, Any]) ->
         "SELECT unresolved_hooks_json FROM world_state WHERE campaign_id = ?",
         (campaign_id,),
     ).fetchone()
+    recent_rewards = fetch_recent_rewards(conn, campaign_id, limit=max(1, safe_int(payload.get("rewards_limit", 5), "rewards_limit")))
+    active_pressures = fetch_active_pressures(conn, campaign_id)
+    next_payoff_hooks = fetch_next_payoff_hooks(conn, campaign_id, limit=max(1, safe_int(payload.get("hooks_limit", 8), "hooks_limit")))
 
     conn.close()
 
@@ -5003,6 +6381,24 @@ def command_recap_generate(args: argparse.Namespace, payload: Dict[str, Any]) ->
         for hook in hooks:
             lines.append(f"- {hook}")
 
+    if recent_rewards:
+        lines.append("Recent rewards:")
+        for reward in recent_rewards:
+            lines.append(
+                f"- {reward['created_at']}: {reward['recipient_type']}:{reward['recipient_id']} "
+                f"(source {reward['source_type']}:{reward['source_id']})"
+            )
+
+    if active_pressures.get("legal_heat") or active_pressures.get("notoriety"):
+        lines.append(
+            f"Pressure: legal_heat={active_pressures.get('legal_heat', 0)} notoriety={active_pressures.get('notoriety', 0)}"
+        )
+
+    if next_payoff_hooks:
+        lines.append("Next payoff hooks:")
+        for hook in next_payoff_hooks:
+            lines.append(f"- {hook}")
+
     if recent_diffs:
         lines.append("Recent state diffs:")
         for row in recent_diffs:
@@ -5032,6 +6428,9 @@ def command_recap_generate(args: argparse.Namespace, payload: Dict[str, Any]) ->
             "rumors": rumors,
             "factions": factions,
             "active_clocks": active_clocks,
+            "recent_rewards": recent_rewards,
+            "active_pressures": active_pressures,
+            "next_payoff_hooks": next_payoff_hooks,
             "recent_turn_diffs": [
                 {
                     "turn_id": row["turn_id"],
@@ -5083,8 +6482,13 @@ def command_map() -> Dict[Tuple[str, str], Any]:
         ("npc", "update"): command_npc_update,
         ("faction", "update"): command_faction_update,
         ("relationship", "adjust"): command_relationship_adjust,
+        ("agenda", "upsert"): command_agenda_upsert,
+        ("agenda", "list"): command_agenda_list,
+        ("agenda", "disable"): command_agenda_disable,
         ("quest", "add"): command_quest_add,
         ("quest", "update"): command_quest_update,
+        ("reward", "grant"): command_reward_grant,
+        ("reward", "history"): command_reward_history,
         ("rumor", "add"): command_rumor_add,
         ("rumor", "reveal"): command_rumor_reveal,
         ("secret", "add"): command_secret_add,
@@ -5114,6 +6518,7 @@ def command_map() -> Dict[Tuple[str, str], Any]:
         ("ooc", "dashboard"): command_ooc,
         ("combat", "start"): command_combat_start,
         ("combat", "act"): command_combat_act,
+        ("combat", "resolve"): command_combat_resolve,
         ("combat", "end"): command_combat_end,
         ("recap", "generate"): command_recap_generate,
         ("validate", "run"): command_validate,

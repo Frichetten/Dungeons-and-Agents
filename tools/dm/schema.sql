@@ -5,7 +5,7 @@ CREATE TABLE IF NOT EXISTS schema_meta (
     value TEXT NOT NULL
 );
 
-INSERT OR IGNORE INTO schema_meta (key, value) VALUES ('schema_version', '2');
+INSERT OR IGNORE INTO schema_meta (key, value) VALUES ('schema_version', '3');
 
 CREATE TABLE IF NOT EXISTS applied_migrations (
     version INTEGER PRIMARY KEY,
@@ -19,7 +19,7 @@ CREATE TABLE IF NOT EXISTS campaigns (
     status TEXT NOT NULL DEFAULT 'active',
     created_at TEXT NOT NULL,
     last_played_at TEXT NOT NULL,
-    schema_version INTEGER NOT NULL DEFAULT 2,
+    schema_version INTEGER NOT NULL DEFAULT 3,
     current_scene TEXT NOT NULL DEFAULT '',
     main_arc TEXT NOT NULL DEFAULT '',
     side_arcs_json TEXT NOT NULL DEFAULT '[]'
@@ -49,6 +49,7 @@ CREATE TABLE IF NOT EXISTS travel_routes (
 CREATE TABLE IF NOT EXISTS world_state (
     campaign_id TEXT PRIMARY KEY REFERENCES campaigns(id) ON DELETE CASCADE,
     world_date TEXT NOT NULL DEFAULT '1 Hammer 1492 DR',
+    world_day_index INTEGER NOT NULL DEFAULT 0,
     world_time TEXT NOT NULL DEFAULT '08:00',
     weather TEXT NOT NULL DEFAULT 'clear',
     region TEXT NOT NULL DEFAULT 'Unknown',
@@ -95,6 +96,8 @@ CREATE TABLE IF NOT EXISTS player_characters (
     prepared_spells_json TEXT NOT NULL DEFAULT '[]',
     concentration_spell TEXT NOT NULL DEFAULT '',
     consumables_json TEXT NOT NULL DEFAULT '{}',
+    xp_total INTEGER NOT NULL DEFAULT 0 CHECK(xp_total >= 0),
+    inspiration INTEGER NOT NULL DEFAULT 0 CHECK(inspiration IN (0, 1)),
     money_cp INTEGER NOT NULL DEFAULT 0 CHECK(money_cp >= 0),
     location_id TEXT REFERENCES locations(id) ON DELETE SET NULL,
     initiative_mod INTEGER NOT NULL DEFAULT 0,
@@ -148,6 +151,8 @@ CREATE TABLE IF NOT EXISTS quests (
     is_main_arc INTEGER NOT NULL DEFAULT 0 CHECK(is_main_arc IN (0, 1)),
     source_npc_id TEXT REFERENCES npcs(id) ON DELETE SET NULL,
     reward_text TEXT NOT NULL DEFAULT '',
+    reward_json TEXT NOT NULL DEFAULT '{}',
+    auto_grant INTEGER NOT NULL DEFAULT 0 CHECK(auto_grant IN (0, 1)),
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
 );
@@ -401,6 +406,18 @@ CREATE TABLE IF NOT EXISTS knowledge_facts (
     updated_at TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS reward_events (
+    id TEXT PRIMARY KEY,
+    campaign_id TEXT NOT NULL REFERENCES campaigns(id) ON DELETE CASCADE,
+    turn_id INTEGER REFERENCES turns(id) ON DELETE SET NULL,
+    source_type TEXT NOT NULL DEFAULT '',
+    source_id TEXT NOT NULL DEFAULT '',
+    recipient_type TEXT NOT NULL,
+    recipient_id TEXT NOT NULL,
+    reward_json TEXT NOT NULL,
+    created_at TEXT NOT NULL
+);
+
 CREATE INDEX IF NOT EXISTS idx_turns_campaign_status ON turns(campaign_id, status);
 CREATE INDEX IF NOT EXISTS idx_events_campaign_turn ON events(campaign_id, turn_id);
 CREATE INDEX IF NOT EXISTS idx_events_campaign_stage ON events(campaign_id, stage);
@@ -411,3 +428,5 @@ CREATE INDEX IF NOT EXISTS idx_turn_diffs_campaign_turn ON turn_diffs(campaign_i
 CREATE INDEX IF NOT EXISTS idx_rumor_links_campaign ON rumor_links(campaign_id, rumor_id, secret_id);
 CREATE INDEX IF NOT EXISTS idx_spells_active_caster ON spells_active(campaign_id, caster_type, caster_id);
 CREATE INDEX IF NOT EXISTS idx_conditions_target ON conditions(campaign_id, target_type, target_id);
+CREATE INDEX IF NOT EXISTS idx_reward_events_campaign_turn ON reward_events(campaign_id, turn_id);
+CREATE INDEX IF NOT EXISTS idx_reward_events_campaign_created ON reward_events(campaign_id, created_at DESC);

@@ -25,8 +25,11 @@ Persistent local D&D 5e campaign engine with SQLite, migration-driven schema upg
 - `dmctl world pulse`
 - `dmctl rest resolve`
 - `dmctl travel resolve`
+- `dmctl agenda <upsert|list|disable>`
+- `dmctl reward <grant|history>`
 - `dmctl spell cast`
 - `dmctl spell end`
+- `dmctl combat resolve`
 - `dmctl ooc <recap|sheet|inventory|quests|rumors|npcs|relationships|factions|time|map|state|savepoint|undo_last_turn|dashboard>`
 
 All commands return JSON only.

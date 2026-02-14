@@ -20,6 +20,7 @@ This file defines player-facing controls and expectations for campaign sessions.
 - `/time`
 - `/map`
 - `/state`
+- `/dashboard`
 - `/savepoint`
 - `/undo_last_turn` (only when rollback is valid and no branch was created)
 
@@ -27,4 +28,5 @@ This file defines player-facing controls and expectations for campaign sessions.
 
 - The assistant handles all dice and rule adjudication.
 - Persistent state is updated through tools, not narrative-only text.
+- `/recap` and `/dashboard` should reflect momentum: recent rewards, active pressures, and next payoff hooks.
 - Actionable narrative turns end with: `What do you do?`
