@@ -745,6 +745,161 @@ def json_load(value: Any, default: Any) -> Any:
         return default
 
 
+def response_full(args: argparse.Namespace, payload: Dict[str, Any]) -> bool:
+    if bool(getattr(args, "full", False)):
+        return True
+    return bool(payload.get("full"))
+
+
+def select_keys(row: Dict[str, Any], keys: Sequence[str]) -> Dict[str, Any]:
+    if not row:
+        return {}
+    return {key: row.get(key) for key in keys}
+
+
+def summarize_turn_diff(diff: Dict[str, Any]) -> Dict[str, Any]:
+    inventory = diff.get("inventory_currency_changed", {})
+    reputation = diff.get("relationship_reputation_changed", {})
+    quest_updates = diff.get("quest_rumor_clock_updates", {})
+    summary = {
+        "time_advanced": bool(diff.get("time_advanced", {}).get("changed")),
+        "location_changed": bool(diff.get("location_change", {}).get("changed")),
+        "hp_resources_changed": len(diff.get("hp_resources_changed", [])),
+        "inventory_changed": len(inventory.get("inventory", [])),
+        "currency_changed": len(inventory.get("currency", [])),
+        "relationships_changed": len(reputation.get("relationships", [])),
+        "factions_changed": len(reputation.get("factions", [])),
+        "npcs_changed": len(reputation.get("npcs", [])),
+        "quests_changed": len(quest_updates.get("quests", [])),
+        "rumors_changed": len(quest_updates.get("rumors", [])),
+        "clocks_changed": len(quest_updates.get("clocks", [])),
+    }
+    summary["total_change_groups"] = sum(
+        value for key, value in summary.items() if key not in {"time_advanced", "location_changed"}
+    )
+    return summary
+
+
+def snapshot_reference(campaign_id: str, snapshot: Dict[str, Any]) -> Dict[str, Any]:
+    latest_turn = snapshot.get("latest_turn", {})
+    return {
+        "path": str(campaign_snapshot_path(campaign_id)),
+        "generated_at": snapshot.get("generated_at"),
+        "schema_version": snapshot.get("schema_version"),
+        "latest_turn": {
+            "id": latest_turn.get("id"),
+            "turn_number": latest_turn.get("turn_number"),
+            "status": latest_turn.get("status"),
+        },
+        "counts": snapshot.get("counts", {}),
+    }
+
+
+def compact_state_view(data: Dict[str, Any], include_hidden: bool) -> Dict[str, Any]:
+    campaign = data.get("campaign", {})
+    world = data.get("world_state", {})
+    players = data.get("players", [])
+    quests = data.get("quests", [])
+    clocks = data.get("clocks", [])
+    public_notes = data.get("notes_public", [])
+    hidden_notes = data.get("notes_hidden", []) if include_hidden else []
+
+    active_quests = [
+        {
+            "id": row.get("id"),
+            "title": row.get("title"),
+            "status": row.get("status"),
+        }
+        for row in quests
+        if str(row.get("status", "")).lower() != "completed"
+    ][:10]
+
+    active_clocks = [
+        {
+            "id": row.get("id"),
+            "name": row.get("name"),
+            "current_segments": row.get("current_segments"),
+            "max_segments": row.get("max_segments"),
+            "status": row.get("status"),
+        }
+        for row in clocks
+        if str(row.get("status", "")).lower() == "active"
+    ][:10]
+
+    compact: Dict[str, Any] = {
+        "profile": data.get("profile"),
+        "schema_version": data.get("schema_version"),
+        "campaign": select_keys(
+            campaign,
+            ("id", "name", "status", "created_at", "last_played_at", "current_scene", "main_arc"),
+        ),
+        "world_state": select_keys(
+            world,
+            (
+                "world_date",
+                "world_time",
+                "weather",
+                "region",
+                "location_id",
+                "location_name",
+                "active_arc",
+                "legal_heat",
+                "notoriety",
+            ),
+        ),
+        "open_turn": select_keys(data.get("open_turn", {}), ("id", "turn_number", "status", "started_at")),
+        "active_encounter": select_keys(
+            data.get("active_encounter", {}),
+            ("id", "name", "status", "round_number", "location_id", "started_at"),
+        ),
+        "players": [
+            select_keys(
+                row,
+                (
+                    "id",
+                    "name",
+                    "level",
+                    "current_hp",
+                    "max_hp",
+                    "ac",
+                    "exhaustion",
+                    "location_id",
+                    "location_name",
+                    "concentration_spell",
+                    "money_cp",
+                ),
+            )
+            for row in players
+        ],
+        "active_quests": active_quests,
+        "active_clocks": active_clocks,
+        "recent_public_notes": [
+            {"turn_id": row.get("turn_id"), "note": row.get("note")} for row in public_notes[:5]
+        ],
+        "counts": {
+            "players": len(players),
+            "npcs": len(data.get("npcs", [])),
+            "factions": len(data.get("factions", [])),
+            "quests": len(quests),
+            "quest_objectives": len(data.get("quest_objectives", [])),
+            "rumors": len(data.get("rumors", [])),
+            "secrets": len(data.get("secrets", [])),
+            "relationships": len(data.get("relationships", [])),
+            "clocks": len(clocks),
+            "inventory_rows": len(data.get("inventory", [])),
+            "notes_public": len(public_notes),
+        },
+    }
+
+    if include_hidden:
+        compact["counts"]["notes_hidden"] = len(hidden_notes)
+        compact["recent_hidden_notes"] = [
+            {"turn_id": row.get("turn_id"), "note": row.get("note")} for row in hidden_notes[:5]
+        ]
+
+    return compact
+
+
 def load_turn_diff_state(conn: sqlite3.Connection, campaign_id: str) -> Dict[str, Any]:
     world = conn.execute(
         """
@@ -2206,6 +2361,7 @@ def command_turn_begin(args: argparse.Namespace, payload: Dict[str, Any]) -> Tup
 def command_turn_commit(args: argparse.Namespace, payload: Dict[str, Any]) -> Tuple[Dict[str, Any], List[str]]:
     campaign_id = require_campaign(args.campaign)
     summary = args.summary or payload.get("summary") or ""
+    full_response = response_full(args, payload)
 
     conn = connect_campaign_db(campaign_id)
     turn = require_open_turn(conn, campaign_id)
@@ -2285,27 +2441,30 @@ def command_turn_commit(args: argparse.Namespace, payload: Dict[str, Any]) -> Tu
     if checkpoint_path.exists():
         checkpoint_path.unlink()
 
-    return (
-        {
-            "campaign": campaign_id,
-            "turn": {
-                "id": turn_id,
-                "turn_number": turn_number,
-                "status": "committed",
-                "ended_at": ended,
-                "summary": summary,
-            },
-            "turn_diff": turn_diff,
-            "staged_events_flushed": staged_events_flushed,
-            "snapshot": snapshot,
+    response_data: Dict[str, Any] = {
+        "campaign": campaign_id,
+        "turn": {
+            "id": turn_id,
+            "turn_number": turn_number,
+            "status": "committed",
+            "ended_at": ended,
+            "summary": summary,
         },
-        [],
-    )
+        "staged_events_flushed": staged_events_flushed,
+        "diff_summary": summarize_turn_diff(turn_diff),
+        "snapshot_ref": snapshot_reference(campaign_id, snapshot),
+    }
+    if full_response:
+        response_data["turn_diff"] = turn_diff
+        response_data["snapshot"] = snapshot
+
+    return (response_data, [])
 
 
 def command_turn_rollback(args: argparse.Namespace, payload: Dict[str, Any]) -> Tuple[Dict[str, Any], List[str]]:
     campaign_id = require_campaign(args.campaign)
     reason = args.reason or payload.get("reason") or "rollback requested"
+    full_response = response_full(args, payload)
 
     conn = connect_campaign_db(campaign_id)
     turn = require_open_turn(conn, campaign_id)
@@ -2357,14 +2516,15 @@ def command_turn_rollback(args: argparse.Namespace, payload: Dict[str, Any]) -> 
     if checkpoint_path.exists():
         checkpoint_path.unlink()
 
-    return (
-        {
-            "campaign": campaign_id,
-            "turn": {"id": turn_id, "status": "rolled_back", "reason": reason, "discarded_events": discarded},
-            "snapshot": snapshot,
-        },
-        [],
-    )
+    response_data: Dict[str, Any] = {
+        "campaign": campaign_id,
+        "turn": {"id": turn_id, "status": "rolled_back", "reason": reason, "discarded_events": discarded},
+        "snapshot_ref": snapshot_reference(campaign_id, snapshot),
+    }
+    if full_response:
+        response_data["snapshot"] = snapshot
+
+    return (response_data, [])
 
 
 def command_turn_diff(args: argparse.Namespace, payload: Dict[str, Any]) -> Tuple[Dict[str, Any], List[str]]:
@@ -2603,12 +2763,21 @@ def command_state_get(args: argparse.Namespace, payload: Dict[str, Any]) -> Tupl
     conn.close()
 
     if args.path:
-        key = args.path
-        if key not in data:
-            raise DMError("invalid_state_path", {"path": key})
-        return ({"path": key, "value": data[key]}, [])
+        paths = [part.strip() for part in str(args.path).split(",") if part.strip()]
+        if not paths:
+            raise DMError("invalid_state_path", {"path": args.path})
+        for key in paths:
+            if key not in data:
+                raise DMError("invalid_state_path", {"path": key})
+        if len(paths) == 1:
+            key = paths[0]
+            return ({"path": key, "value": data[key]}, [])
+        return ({"paths": paths, "values": {key: data[key] for key in paths}}, [])
 
-    return (data, [])
+    if response_full(args, payload):
+        return (data, [])
+
+    return (compact_state_view(data, include_hidden), [])
 
 
 def upsert_player_character(conn: sqlite3.Connection, campaign_id: str, pc: Dict[str, Any]) -> Dict[str, Any]:
@@ -5367,6 +5536,7 @@ def command_ooc(args: argparse.Namespace, payload: Dict[str, Any]) -> Tuple[Dict
         return ({"current_location": as_dict(world), "locations": locations, "routes": routes}, [])
 
     if action == "dashboard":
+        full_response = response_full(args, payload)
         campaign = conn.execute(
             "SELECT id, name, status, created_at, last_played_at FROM campaigns WHERE id = ?",
             (campaign_id,),
@@ -5386,6 +5556,18 @@ def command_ooc(args: argparse.Namespace, payload: Dict[str, Any]) -> Tuple[Dict
             "SELECT turn_id, turn_number, diff_json, created_at FROM turn_diffs WHERE campaign_id = ? ORDER BY created_at DESC LIMIT 1",
             (campaign_id,),
         ).fetchone()
+        latest_turn_diff: Dict[str, Any] = {}
+        if latest_diff:
+            diff_payload = json_load(latest_diff["diff_json"], {})
+            latest_turn_diff = {
+                "turn_id": latest_diff["turn_id"],
+                "turn_number": latest_diff["turn_number"],
+                "created_at": latest_diff["created_at"],
+            }
+            if full_response:
+                latest_turn_diff["diff"] = diff_payload
+            else:
+                latest_turn_diff["diff_summary"] = summarize_turn_diff(diff_payload)
         recent_rewards = fetch_recent_rewards(conn, campaign_id, limit=max(1, safe_int(payload.get("rewards_limit", 5), "rewards_limit")))
         active_pressures = fetch_active_pressures(conn, campaign_id)
         next_payoff_hooks = fetch_next_payoff_hooks(
@@ -5403,14 +5585,7 @@ def command_ooc(args: argparse.Namespace, payload: Dict[str, Any]) -> Tuple[Dict
                 "recent_rewards": recent_rewards,
                 "active_pressures": active_pressures,
                 "next_payoff_hooks": next_payoff_hooks,
-                "latest_turn_diff": {
-                    "turn_id": latest_diff["turn_id"],
-                    "turn_number": latest_diff["turn_number"],
-                    "created_at": latest_diff["created_at"],
-                    "diff": json_load(latest_diff["diff_json"], {}),
-                }
-                if latest_diff
-                else {},
+                "latest_turn_diff": latest_turn_diff,
             },
             [],
         )
@@ -6262,6 +6437,7 @@ def command_combat_end(args: argparse.Namespace, payload: Dict[str, Any]) -> Tup
 def command_recap_generate(args: argparse.Namespace, payload: Dict[str, Any]) -> Tuple[Dict[str, Any], List[str]]:
     campaign_id = require_campaign(args.campaign)
     limit = safe_int(payload.get("limit", 5), "limit")
+    full_response = response_full(args, payload)
     if limit <= 0:
         limit = 5
 
@@ -6399,51 +6575,57 @@ def command_recap_generate(args: argparse.Namespace, payload: Dict[str, Any]) ->
         for hook in next_payoff_hooks:
             lines.append(f"- {hook}")
 
+    diff_summaries: List[Dict[str, Any]] = []
+    diff_rows_full: List[Dict[str, Any]] = []
     if recent_diffs:
         lines.append("Recent state diffs:")
         for row in recent_diffs:
             diff = json_load(row["diff_json"], {})
-            update_counts = {
-                "resources": len(diff.get("hp_resources_changed", [])),
-                "inventory": len(diff.get("inventory_currency_changed", {}).get("inventory", [])),
-                "relationships": len(diff.get("relationship_reputation_changed", {}).get("relationships", [])),
-                "quests": len(diff.get("quest_rumor_clock_updates", {}).get("quests", [])),
-                "rumors": len(diff.get("quest_rumor_clock_updates", {}).get("rumors", [])),
-                "clocks": len(diff.get("quest_rumor_clock_updates", {}).get("clocks", [])),
-            }
-            lines.append(
-                f"- Turn {row['turn_number']}: resources={update_counts['resources']} inventory={update_counts['inventory']} "
-                f"relationships={update_counts['relationships']} quests={update_counts['quests']} rumors={update_counts['rumors']} clocks={update_counts['clocks']}"
-            )
-
-    recap_text = "\n".join(lines)
-
-    return (
-        {
-            "campaign": campaign_id,
-            "limit": limit,
-            "recap": recap_text,
-            "turns": turns,
-            "open_quests": open_quests,
-            "rumors": rumors,
-            "factions": factions,
-            "active_clocks": active_clocks,
-            "recent_rewards": recent_rewards,
-            "active_pressures": active_pressures,
-            "next_payoff_hooks": next_payoff_hooks,
-            "recent_turn_diffs": [
+            summary = summarize_turn_diff(diff)
+            diff_summaries.append(
                 {
                     "turn_id": row["turn_id"],
                     "turn_number": row["turn_number"],
                     "created_at": row["created_at"],
-                    "diff": json_load(row["diff_json"], {}),
+                    "diff_summary": summary,
                 }
-                for row in recent_diffs
-            ],
-            "open_threads": hooks,
-        },
-        [],
-    )
+            )
+            if full_response:
+                diff_rows_full.append(
+                    {
+                        "turn_id": row["turn_id"],
+                        "turn_number": row["turn_number"],
+                        "created_at": row["created_at"],
+                        "diff": diff,
+                    }
+                )
+            lines.append(
+                f"- Turn {row['turn_number']}: resources={summary['hp_resources_changed']} inventory={summary['inventory_changed']} "
+                f"relationships={summary['relationships_changed']} quests={summary['quests_changed']} "
+                f"rumors={summary['rumors_changed']} clocks={summary['clocks_changed']}"
+            )
+
+    recap_text = "\n".join(lines)
+
+    recap_data: Dict[str, Any] = {
+        "campaign": campaign_id,
+        "limit": limit,
+        "recap": recap_text,
+        "turns": turns,
+        "open_quests": open_quests,
+        "rumors": rumors,
+        "factions": factions,
+        "active_clocks": active_clocks,
+        "recent_rewards": recent_rewards,
+        "active_pressures": active_pressures,
+        "next_payoff_hooks": next_payoff_hooks,
+        "recent_turn_diffs": diff_rows_full if full_response else diff_summaries,
+        "open_threads": hooks,
+    }
+    if not full_response:
+        recap_data["recent_turn_diffs_mode"] = "summary"
+
+    return (recap_data, [])
 
 
 def command_validate(args: argparse.Namespace, _payload: Dict[str, Any]) -> Tuple[Dict[str, Any], List[str]]:
@@ -6542,6 +6724,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--path")
     parser.add_argument("--profile")
     parser.add_argument("--include-hidden", action="store_true")
+    parser.add_argument("--full", action="store_true")
     parser.add_argument("--advantage", action="store_true")
     parser.add_argument("--disadvantage", action="store_true")
     parser.add_argument("--keep-highest", type=int)

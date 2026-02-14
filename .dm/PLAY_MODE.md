@@ -204,6 +204,8 @@ SECTION 7: GAME LOOP PROTOCOL
 For every player turn, follow this exact sequence:
 
 1. Load latest campaign state with `dmctl campaign load`.
+   - Prefer targeted reads with `dmctl state get --path <key>` (or comma-separated paths) instead of full dumps.
+   - Use `--full` only when debugging or when a compact response is insufficient.
 2. Run continuity check.
 3. Frame scene with stakes and sensory detail.
 4. Ask for action if needed.

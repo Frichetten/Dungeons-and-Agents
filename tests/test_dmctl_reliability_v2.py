@@ -130,7 +130,8 @@ class TestDMCTLReliabilityV2(unittest.TestCase):
             },
         )
         commit = run_dmctl("turn", "commit", "--campaign", self.campaign_id, "--summary", "Morning updates")
-        self.assertIn("turn_diff", commit["data"])
+        self.assertIn("diff_summary", commit["data"])
+        self.assertIn("snapshot_ref", commit["data"])
 
         diff = run_dmctl("turn", "diff", "--campaign", self.campaign_id)
         payload = diff["data"]["diff"]
@@ -185,7 +186,7 @@ class TestDMCTLReliabilityV2(unittest.TestCase):
         self.assertEqual(staged_count, 0)
         self.assertEqual(db_events, file_events)
 
-        state = run_dmctl("state", "get", "--campaign", self.campaign_id, "--include-hidden")
+        state = run_dmctl("state", "get", "--campaign", self.campaign_id, "--include-hidden", "--full")
         names = {row["item_name"] for row in state["data"]["inventory"]}
         self.assertNotIn(marker_name, names)
 
@@ -239,6 +240,11 @@ class TestDMCTLReliabilityV2(unittest.TestCase):
             self.assertEqual(commit["command"], fixture["turn_commit"]["command"])
             for key in fixture["turn_commit"]["data_keys"]:
                 self.assertIn(key, commit["data"])
+
+            run_dmctl("turn", "begin", "--campaign", c_id)
+            commit_full = run_dmctl("turn", "commit", "--campaign", c_id, "--summary", "Compat verbose", "--full")
+            self.assertIn("turn_diff", commit_full["data"])
+            self.assertIn("snapshot", commit_full["data"])
 
             turn_diff = run_dmctl("turn", "diff", "--campaign", c_id)
             self.assertEqual(turn_diff["command"], fixture["turn_diff"]["command"])

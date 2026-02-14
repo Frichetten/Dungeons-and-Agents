@@ -106,13 +106,27 @@ class TestDMCTLEngagementV3(unittest.TestCase):
         run_dmctl("turn", "begin", "--campaign", self.campaign_id)
         pulse_4 = run_dmctl("world", "pulse", "--campaign", self.campaign_id, payload={"hours": 1})
         self.assertEqual(pulse_4["data"]["summary"]["agenda_rules_applied"], 1)
-        state = run_dmctl("state", "get", "--campaign", self.campaign_id, "--include-hidden")
+        state = run_dmctl(
+            "state",
+            "get",
+            "--campaign",
+            self.campaign_id,
+            "--include-hidden",
+            payload={"full": True},
+        )
         clocks = [c for c in state["data"]["clocks"] if c["name"] == "Bandit Escalation Clock"]
         self.assertEqual(len(clocks), 1)
         self.assertEqual(clocks[0]["current_segments"], 2)
 
     def test_01_reward_atomicity(self):
-        baseline = run_dmctl("state", "get", "--campaign", self.campaign_id, "--include-hidden")
+        baseline = run_dmctl(
+            "state",
+            "get",
+            "--campaign",
+            self.campaign_id,
+            "--include-hidden",
+            payload={"full": True},
+        )
         hero_before = [pc for pc in baseline["data"]["players"] if pc["id"] == "pc_hero"][0]
         money_before = hero_before["money_cp"]
 
@@ -136,7 +150,14 @@ class TestDMCTLEngagementV3(unittest.TestCase):
         )
         self.assertEqual(failed["error"], "faction_not_found")
 
-        state = run_dmctl("state", "get", "--campaign", self.campaign_id, "--include-hidden")
+        state = run_dmctl(
+            "state",
+            "get",
+            "--campaign",
+            self.campaign_id,
+            "--include-hidden",
+            payload={"full": True},
+        )
         hero_after = [pc for pc in state["data"]["players"] if pc["id"] == "pc_hero"][0]
         self.assertEqual(hero_after["money_cp"], money_before)
 
@@ -175,7 +196,14 @@ class TestDMCTLEngagementV3(unittest.TestCase):
         self.assertEqual(len(updated["data"]["auto_granted_rewards"]), 1)
         run_dmctl("turn", "commit", "--campaign", self.campaign_id, "--summary", "Quest reward auto-grant")
 
-        state = run_dmctl("state", "get", "--campaign", self.campaign_id, "--include-hidden")
+        state = run_dmctl(
+            "state",
+            "get",
+            "--campaign",
+            self.campaign_id,
+            "--include-hidden",
+            payload={"full": True},
+        )
         hero = [pc for pc in state["data"]["players"] if pc["id"] == "pc_hero"][0]
         self.assertEqual(hero["xp_total"], 120)
         self.assertEqual(hero["money_cp"], 35)
@@ -267,7 +295,14 @@ class TestDMCTLEngagementV3(unittest.TestCase):
         self.assertGreaterEqual(len(soft["warnings"]), 1)
         run_dmctl("turn", "commit", "--campaign", self.campaign_id, "--summary", "Soft ration shortage")
 
-        state = run_dmctl("state", "get", "--campaign", self.campaign_id, "--include-hidden")
+        state = run_dmctl(
+            "state",
+            "get",
+            "--campaign",
+            self.campaign_id,
+            "--include-hidden",
+            payload={"full": True},
+        )
         hero = [pc for pc in state["data"]["players"] if pc["id"] == "pc_hero"][0]
         self.assertEqual(hero["exhaustion"], 1)
 

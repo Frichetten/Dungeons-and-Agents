@@ -34,6 +34,12 @@ Persistent local D&D 5e campaign engine with SQLite, migration-driven schema upg
 
 All commands return JSON only.
 
+## Compact Responses
+
+- High-volume commands now default to compact payloads (`turn commit`, `turn rollback`, `ooc dashboard`, `recap generate`, and `state get` without `--path`).
+- Use `--full` to request the legacy verbose payload for debugging or tooling compatibility.
+- Use `state get --path <key>` (or comma-separated keys) to fetch only the state slices you need.
+
 ## Run
 
 ```bash

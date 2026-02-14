@@ -9,7 +9,7 @@
   },
   "turn_commit": {
     "command": "turn commit",
-    "data_keys": ["campaign", "turn", "turn_diff", "staged_events_flushed", "snapshot"]
+    "data_keys": ["campaign", "turn", "diff_summary", "staged_events_flushed", "snapshot_ref"]
   },
   "turn_diff": {
     "command": "turn diff",
