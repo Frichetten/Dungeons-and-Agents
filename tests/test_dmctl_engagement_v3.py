@@ -1,4 +1,5 @@
 import json
+import sqlite3
 import shutil
 import subprocess
 import unittest
@@ -24,6 +25,16 @@ def run_dmctl(*parts, payload=None, expect_ok=True):
     if not expect_ok and body.get("ok"):
         raise AssertionError(f"Unexpected success: cmd={cmd} body={body}")
     return body
+
+
+def roll_log_count(campaign_id: str) -> int:
+    db_path = CAMPAIGNS_ROOT / campaign_id / "campaign.db"
+    conn = sqlite3.connect(db_path)
+    try:
+        row = conn.execute("SELECT COUNT(*) FROM roll_log").fetchone()
+        return int(row[0] if row else 0)
+    finally:
+        conn.close()
 
 
 class TestDMCTLEngagementV3(unittest.TestCase):
@@ -323,7 +334,79 @@ class TestDMCTLEngagementV3(unittest.TestCase):
         self.assertEqual(strict["error"], "insufficient_inventory")
         run_dmctl("turn", "rollback", "--campaign", self.campaign_id, payload={"reason": "strict shortage test"})
 
-    def test_05_time_rollover_and_ooc_contract(self):
+    def test_05_combat_resolve_failure_does_not_persist_rolls(self):
+        run_dmctl("turn", "begin", "--campaign", self.campaign_id)
+        run_dmctl(
+            "npc",
+            "create",
+            "--campaign",
+            self.campaign_id,
+            payload={
+                "id": "npc_guard_v3",
+                "name": "Gate Guard",
+                "location_id": "loc_start",
+                "max_hp": 18,
+                "current_hp": 18,
+                "ac": 12,
+                "initiative_mod": 1,
+            },
+        )
+        start = run_dmctl(
+            "combat",
+            "start",
+            "--campaign",
+            self.campaign_id,
+            payload={
+                "name": "Resolve Rejection Drill",
+                "location_id": "loc_start",
+                "participants": [{"type": "pc", "id": "pc_hero"}, {"type": "npc", "id": "npc_guard_v3"}],
+            },
+        )
+        encounter_id = start["data"]["encounter_id"]
+        target = [c for c in start["data"]["combatants"] if c["source_type"] == "npc"][0]["id"]
+
+        initial_count = roll_log_count(self.campaign_id)
+        first = run_dmctl(
+            "combat",
+            "resolve",
+            "--campaign",
+            self.campaign_id,
+            payload={
+                "mode": "attack",
+                "encounter_id": encounter_id,
+                "target_id": target,
+                "attack_bonus": 8,
+                "damage_formula": "1d1+1",
+                "use_action": True,
+                "end_turn": False,
+            },
+        )
+        self.assertEqual(first["data"]["resolution"]["mode"], "attack")
+        after_first = roll_log_count(self.campaign_id)
+        self.assertGreater(after_first, initial_count)
+
+        failed = run_dmctl(
+            "combat",
+            "resolve",
+            "--campaign",
+            self.campaign_id,
+            payload={
+                "mode": "attack",
+                "encounter_id": encounter_id,
+                "target_id": target,
+                "attack_bonus": 8,
+                "damage_formula": "1d1+1",
+                "use_action": True,
+                "end_turn": False,
+            },
+            expect_ok=False,
+        )
+        self.assertEqual(failed["error"], "action_already_used")
+        after_failed = roll_log_count(self.campaign_id)
+        self.assertEqual(after_failed, after_first)
+        run_dmctl("turn", "rollback", "--campaign", self.campaign_id, payload={"reason": "combat resolve rejection roll log"})
+
+    def test_06_time_rollover_and_ooc_contract(self):
         run_dmctl("turn", "begin", "--campaign", self.campaign_id)
         run_dmctl(
             "state",
@@ -348,6 +431,21 @@ class TestDMCTLEngagementV3(unittest.TestCase):
         self.assertIn("recent_rewards", recap["data"])
         self.assertIn("active_pressures", recap["data"])
         self.assertIn("next_payoff_hooks", recap["data"])
+
+    def test_07_legacy_world_date_day_count_parses(self):
+        run_dmctl("turn", "begin", "--campaign", self.campaign_id)
+        run_dmctl(
+            "state",
+            "set",
+            "--campaign",
+            self.campaign_id,
+            payload={"world_state": {"world_date": "100 Hammer 1492 DR", "world_time": "08:00"}},
+        )
+        run_dmctl("world", "pulse", "--campaign", self.campaign_id, payload={"hours": 24})
+        run_dmctl("turn", "commit", "--campaign", self.campaign_id, "--summary", "Legacy day count progression")
+
+        ooc_time = run_dmctl("ooc", "time", "--campaign", self.campaign_id)
+        self.assertEqual(ooc_time["data"]["time"]["world_date"], "11 Tarsakh 1492 DR")
 
 
 if __name__ == "__main__":

@@ -161,7 +161,7 @@ def month_index(name: str) -> Optional[int]:
 
 def parse_world_date_to_day_index(value: Any) -> Optional[int]:
     text = str(value or "").strip()
-    match = re.match(r"^(\d{1,2})\s+([A-Za-z]+)\s+(-?\d+)\s+DR$", text, flags=re.IGNORECASE)
+    match = re.match(r"^([+-]?\d+)\s+([A-Za-z]+)\s+(-?\d+)\s+DR$", text, flags=re.IGNORECASE)
     if not match:
         return None
     day = safe_int(match.group(1), "world_date.day")
@@ -169,9 +169,8 @@ def parse_world_date_to_day_index(value: Any) -> Optional[int]:
     year = safe_int(match.group(3), "world_date.year")
     if month_idx is None:
         return None
-    day = max(1, min(CALENDAR_DAYS_PER_MONTH, day))
     year_base = year * CALENDAR_DAYS_PER_YEAR
-    return year_base + (month_idx * CALENDAR_DAYS_PER_MONTH) + (day - 1)
+    return max(0, year_base + (month_idx * CALENDAR_DAYS_PER_MONTH) + (day - 1))
 
 
 def format_world_date_from_day_index(day_index: int) -> str:
@@ -2572,7 +2571,12 @@ def command_dice_roll(args: argparse.Namespace, payload: Dict[str, Any]) -> Tupl
     campaign_id = args.campaign or payload.get("campaign")
     context = args.context or payload.get("context") or ""
 
+    persist_roll = bool(payload.get("persist", True))
     if campaign_id:
+        roll["campaign"] = campaign_id
+        roll["context"] = context
+
+    if campaign_id and persist_roll:
         conn = connect_campaign_db(campaign_id)
         open_turn = get_open_turn(conn, campaign_id)
         turn_id = parse_turn_id(open_turn)
@@ -2621,11 +2625,72 @@ def command_dice_roll(args: argparse.Namespace, payload: Dict[str, Any]) -> Tupl
         conn.commit()
         conn.close()
         roll["roll_id"] = roll_id
-        roll["campaign"] = campaign_id
         roll["turn_id"] = turn_id
-        roll["context"] = context
 
     return (roll, [])
+
+
+def persist_roll_results(campaign_id: str, rolls: List[Dict[str, Any]]) -> None:
+    if not rolls:
+        return
+    conn = connect_campaign_db(campaign_id)
+    try:
+        open_turn = get_open_turn(conn, campaign_id)
+        turn_id = parse_turn_id(open_turn)
+        ts = now_iso()
+        for roll_entry in rolls:
+            result = roll_entry.get("result")
+            if not isinstance(result, dict):
+                continue
+            roll_id = uuid_id("roll")
+            context = str(result.get("context") or "")
+            conn.execute(
+                """
+                INSERT INTO roll_log (
+                    id, campaign_id, turn_id, formula, raw_dice_json,
+                    selected_dice_json, modifier, total, context, advantage_state, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    roll_id,
+                    campaign_id,
+                    turn_id,
+                    str(result.get("formula") or ""),
+                    json.dumps(result.get("raw_dice") or [], separators=(",", ":")),
+                    json.dumps(result.get("selected_dice") or [], separators=(",", ":")),
+                    safe_int(result.get("modifier", 0), "modifier"),
+                    safe_int(result.get("total", 0), "total"),
+                    context,
+                    str(result.get("advantage_state") or "none"),
+                    ts,
+                ),
+            )
+            persist_event(
+                conn,
+                campaign_id,
+                turn_id,
+                "dice roll",
+                {
+                    "roll_id": roll_id,
+                    "formula": str(result.get("formula") or ""),
+                    "raw_dice": result.get("raw_dice") or [],
+                    "selected_dice": result.get("selected_dice") or [],
+                    "modifier": safe_int(result.get("modifier", 0), "modifier"),
+                    "total": safe_int(result.get("total", 0), "total"),
+                    "context": context,
+                    "advantage_state": str(result.get("advantage_state") or "none"),
+                },
+            )
+            result["roll_id"] = roll_id
+            result["campaign"] = campaign_id
+            result["turn_id"] = turn_id
+            result["context"] = context
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
 
 
 def command_state_get(args: argparse.Namespace, payload: Dict[str, Any]) -> Tuple[Dict[str, Any], List[str]]:
@@ -6223,6 +6288,7 @@ def command_combat_resolve(args: argparse.Namespace, payload: Dict[str, Any]) ->
             "context": payload.get("attack_context", f"combat_resolve_attack:{encounter_id}:{acting_id}->{target_id}"),
             "advantage": bool(payload.get("advantage", False)),
             "disadvantage": bool(payload.get("disadvantage", False)),
+            "persist": False,
         }
         attack_roll, attack_warnings = command_dice_roll(args, attack_roll_payload)
         natural = abs(safe_int((attack_roll.get("selected_dice") or [0])[0], "attack_natural"))
@@ -6244,6 +6310,7 @@ def command_combat_resolve(args: argparse.Namespace, payload: Dict[str, Any]) ->
                 "campaign": campaign_id,
                 "formula": resolved_formula,
                 "context": payload.get("damage_context", f"combat_resolve_damage:{encounter_id}:{acting_id}->{target_id}"),
+                "persist": False,
             }
             damage_roll, _ = command_dice_roll(args, damage_roll_payload)
             damage_to_apply = max(0, safe_int(damage_roll["total"], "damage_total"))
@@ -6253,6 +6320,7 @@ def command_combat_resolve(args: argparse.Namespace, payload: Dict[str, Any]) ->
                 "campaign": campaign_id,
                 "formula": str(miss_damage_formula),
                 "context": payload.get("damage_context", f"combat_resolve_miss_damage:{encounter_id}:{acting_id}->{target_id}"),
+                "persist": False,
             }
             damage_roll, _ = command_dice_roll(args, miss_roll_payload)
             damage_to_apply = max(0, safe_int(damage_roll["total"], "damage_total"))
@@ -6283,6 +6351,7 @@ def command_combat_resolve(args: argparse.Namespace, payload: Dict[str, Any]) ->
             action_payload["condition_source"] = payload.get("condition_source", action_payload["action"])
 
         action_result, action_warnings = command_combat_act(args, action_payload)
+        persist_roll_results(campaign_id, rolls)
         resolution.update(
             {
                 "hit": hit,
@@ -6312,6 +6381,7 @@ def command_combat_resolve(args: argparse.Namespace, payload: Dict[str, Any]) ->
         "context": payload.get("save_context", f"combat_resolve_save:{encounter_id}:{target_id}"),
         "advantage": bool(payload.get("save_advantage", False)),
         "disadvantage": bool(payload.get("save_disadvantage", False)),
+        "persist": False,
     }
     save_roll, save_warnings = command_dice_roll(args, save_roll_payload)
     save_total = safe_int(save_roll["total"], "save_total")
@@ -6329,6 +6399,7 @@ def command_combat_resolve(args: argparse.Namespace, payload: Dict[str, Any]) ->
                 "campaign": campaign_id,
                 "formula": str(success_damage_formula),
                 "context": payload.get("damage_context", f"combat_resolve_save_success_damage:{encounter_id}:{target_id}"),
+                "persist": False,
             }
             damage_roll_result, _ = command_dice_roll(args, damage_roll_payload)
             damage_to_apply = max(0, safe_int(damage_roll_result["total"], "damage_total"))
@@ -6338,6 +6409,7 @@ def command_combat_resolve(args: argparse.Namespace, payload: Dict[str, Any]) ->
                 "campaign": campaign_id,
                 "formula": str(fail_damage_formula),
                 "context": payload.get("damage_context", f"combat_resolve_save_half_damage:{encounter_id}:{target_id}"),
+                "persist": False,
             }
             damage_roll_result, _ = command_dice_roll(args, damage_roll_payload)
             full_damage = max(0, safe_int(damage_roll_result["total"], "damage_total"))
@@ -6348,6 +6420,7 @@ def command_combat_resolve(args: argparse.Namespace, payload: Dict[str, Any]) ->
             "campaign": campaign_id,
             "formula": str(fail_damage_formula),
             "context": payload.get("damage_context", f"combat_resolve_save_fail_damage:{encounter_id}:{target_id}"),
+            "persist": False,
         }
         damage_roll_result, _ = command_dice_roll(args, damage_roll_payload)
         damage_to_apply = max(0, safe_int(damage_roll_result["total"], "damage_total"))
@@ -6378,6 +6451,7 @@ def command_combat_resolve(args: argparse.Namespace, payload: Dict[str, Any]) ->
         action_payload["condition_source"] = payload.get("condition_source", action_payload["action"])
 
     action_result, action_warnings = command_combat_act(args, action_payload)
+    persist_roll_results(campaign_id, rolls)
     resolution.update(
         {
             "save_dc": save_dc,
