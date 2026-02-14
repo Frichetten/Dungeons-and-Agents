@@ -1,0 +1,45 @@
+# macOS / editor noise
+.DS_Store
+*.swp
+*.swo
+
+# IDE settings
+.idea/
+.vscode/
+
+# Python bytecode and caches
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+
+# Test and tooling caches
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.pyre/
+.tox/
+.nox/
+.coverage
+.coverage.*
+htmlcov/
+
+# Packaging artifacts
+build/
+dist/
+.eggs/
+*.egg-info/
+pip-wheel-metadata/
+
+# Runtime DM state (keep .dm/templates/ available for versioned templates)
+.dm/campaigns/
+.dm/backups/
+
+# SQLite transient files
+*.db-wal
+*.db-shm
