@@ -530,6 +530,58 @@ def discard_staged_events(conn: sqlite3.Connection, campaign_id: str, turn_id: i
     return safe_int(cursor.rowcount, "discarded_event_count")
 
 
+def capture_events(
+    conn: sqlite3.Connection, campaign_id: str, turn_id: int, stage: str
+) -> List[Dict[str, Any]]:
+    if stage not in {"staged", "committed", "discarded"}:
+        raise DMError("invalid_event_stage", {"stage": stage})
+    rows = conn.execute(
+        """
+        SELECT rowid AS row_order, id, campaign_id, turn_id, command, payload_json, created_at
+        FROM events
+        WHERE campaign_id = ? AND turn_id = ? AND stage = ?
+        ORDER BY row_order
+        """,
+        (campaign_id, turn_id, stage),
+    ).fetchall()
+    return to_jsonable(rows)
+
+
+def insert_captured_events(
+    conn: sqlite3.Connection,
+    events: List[Dict[str, Any]],
+    stage: str,
+    flushed_to_log: int,
+    discarded_at: Optional[str] = None,
+) -> int:
+    inserted = 0
+    for event in events:
+        cursor = conn.execute(
+            """
+            INSERT INTO events (
+                id, campaign_id, turn_id, command, payload_json, created_at,
+                stage, flushed_to_log, discarded_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(id) DO NOTHING
+            """,
+            (
+                event["id"],
+                event["campaign_id"],
+                event["turn_id"],
+                event["command"],
+                event["payload_json"],
+                event["created_at"],
+                stage,
+                flushed_to_log,
+                discarded_at,
+            ),
+        )
+        if cursor.rowcount and cursor.rowcount > 0:
+            inserted += cursor.rowcount
+    return inserted
+
+
 def persist_event(
     conn: sqlite3.Connection,
     campaign_id: str,
@@ -2292,9 +2344,6 @@ def command_turn_commit(args: argparse.Namespace, payload: Dict[str, Any]) -> Tu
     transcript.append("\n")
     append_transcript(campaign_transcript_path(campaign_id), "".join(transcript))
 
-    if checkpoint_path.exists():
-        checkpoint_path.unlink()
-
     response_data: Dict[str, Any] = {
         "campaign": campaign_id,
         "turn": {
@@ -2341,19 +2390,28 @@ def command_turn_rollback(args: argparse.Namespace, payload: Dict[str, Any]) -> 
             },
         )
 
+    staged_events = capture_events(conn, campaign_id, turn_id, "staged")
     conn.close()
     restore_database_from_file(checkpoint_path, campaign_db_path(campaign_id))
 
     conn2 = connect_campaign_db(campaign_id)
+    rollback_ts = now_iso()
     conn2.execute(
         """
         UPDATE turns
         SET status = 'rolled_back', ended_at = ?, summary = ?
         WHERE id = ?
         """,
-        (now_iso(), reason, turn_id),
+        (rollback_ts, reason, turn_id),
     )
     discarded = discard_staged_events(conn2, campaign_id, turn_id)
+    discarded += insert_captured_events(
+        conn2,
+        staged_events,
+        stage="discarded",
+        flushed_to_log=0,
+        discarded_at=rollback_ts,
+    )
 
     persist_event(
         conn2,
@@ -4289,8 +4347,112 @@ def command_ooc(args: argparse.Namespace, payload: Dict[str, Any]) -> Tuple[Dict
         return (backup, [])
 
     if action == "undo_last_turn":
-        rollback_payload = {"reason": payload.get("reason", "ooc undo_last_turn")}
-        return command_turn_rollback(args, rollback_payload)
+        reason = str(payload.get("reason", "ooc undo_last_turn"))
+        conn = connect_campaign_db(campaign_id)
+        open_turn = get_open_turn(conn, campaign_id)
+        if open_turn is not None:
+            conn.close()
+            rollback_payload = {"reason": reason}
+            return command_turn_rollback(args, rollback_payload)
+
+        last_turn = conn.execute(
+            """
+            SELECT * FROM turns
+            WHERE campaign_id = ? AND status = 'committed'
+            ORDER BY turn_number DESC
+            LIMIT 1
+            """,
+            (campaign_id,),
+        ).fetchone()
+        if last_turn is None:
+            conn.close()
+            raise DMError("undo_not_available", {"campaign": campaign_id, "reason": "no_committed_turn"})
+
+        turn_id = safe_int(last_turn["id"], "turn_id")
+        checkpoint_path = Path(last_turn["checkpoint_path"] or last_turn["backup_path"])
+        if not checkpoint_path.exists():
+            conn.close()
+            raise DMError(
+                "undo_not_available",
+                {
+                    "campaign": campaign_id,
+                    "reason": "checkpoint_missing",
+                    "turn_id": turn_id,
+                    "checkpoint_path": str(checkpoint_path),
+                },
+            )
+
+        expected_checksum = str(last_turn["checkpoint_checksum"] or "")
+        actual_checksum = file_sha256(checkpoint_path)
+        if expected_checksum and expected_checksum != actual_checksum:
+            conn.close()
+            raise DMError(
+                "checkpoint_checksum_mismatch",
+                {
+                    "turn_id": turn_id,
+                    "expected_checksum": expected_checksum,
+                    "actual_checksum": actual_checksum,
+                    "checkpoint_path": str(checkpoint_path),
+                },
+            )
+
+        committed_events = capture_events(conn, campaign_id, turn_id, "committed")
+        conn.close()
+
+        restore_database_from_file(checkpoint_path, campaign_db_path(campaign_id))
+        conn2 = connect_campaign_db(campaign_id)
+        rollback_ts = now_iso()
+        conn2.execute(
+            """
+            UPDATE turns
+            SET status = 'rolled_back', ended_at = ?, summary = ?
+            WHERE id = ?
+            """,
+            (rollback_ts, reason, turn_id),
+        )
+        discarded = discard_staged_events(conn2, campaign_id, turn_id)
+        restored_committed = insert_captured_events(
+            conn2,
+            committed_events,
+            stage="committed",
+            flushed_to_log=1,
+        )
+        conn2.execute(
+            "DELETE FROM turn_diffs WHERE campaign_id = ? AND turn_id = ?",
+            (campaign_id, turn_id),
+        )
+        persist_event(
+            conn2,
+            campaign_id,
+            turn_id,
+            "turn rollback",
+            {
+                "turn_id": turn_id,
+                "reason": reason,
+                "discarded_events": discarded,
+                "restored_committed_events": restored_committed,
+                "undo_mode": "committed_turn",
+            },
+        )
+        set_campaign_last_played(conn2, campaign_id)
+        snapshot = write_snapshot(conn2, campaign_id)
+        conn2.commit()
+        conn2.close()
+        return (
+            {
+                "campaign": campaign_id,
+                "turn": {
+                    "id": turn_id,
+                    "status": "rolled_back",
+                    "reason": reason,
+                    "discarded_events": discarded,
+                    "mode": "committed",
+                },
+                "restored_committed_events": restored_committed,
+                "snapshot_ref": snapshot_reference(campaign_id, snapshot),
+            },
+            [],
+        )
 
     conn = connect_campaign_db(campaign_id)
 
@@ -4426,7 +4588,7 @@ def command_ooc(args: argparse.Namespace, payload: Dict[str, Any]) -> Tuple[Dict
             (campaign_id, campaign_id, campaign_id),
         ).fetchone()
         latest_diff = conn.execute(
-            "SELECT turn_id, turn_number, diff_json, created_at FROM turn_diffs WHERE campaign_id = ? ORDER BY created_at DESC LIMIT 1",
+            "SELECT turn_id, turn_number, diff_json, created_at FROM turn_diffs WHERE campaign_id = ? ORDER BY turn_id DESC LIMIT 1",
             (campaign_id,),
         ).fetchone()
         latest_turn_diff: Dict[str, Any] = {}
@@ -5119,7 +5281,7 @@ def command_recap_generate(args: argparse.Namespace, payload: Dict[str, Any]) ->
             SELECT turn_id, turn_number, diff_json, created_at
             FROM turn_diffs
             WHERE campaign_id = ?
-            ORDER BY created_at DESC
+            ORDER BY turn_id DESC
             LIMIT ?
             """,
             (campaign_id, limit),
@@ -5330,6 +5492,51 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def build_help_payload(group: Optional[str], action: Optional[str]) -> Dict[str, Any]:
+    commands = command_map()
+    grouped: Dict[str, List[str]] = {}
+    for cmd_group, cmd_action in sorted(commands.keys()):
+        grouped.setdefault(cmd_group, []).append(cmd_action)
+
+    payload: Dict[str, Any] = {
+        "usage": "dmctl <group> <action> [options]",
+        "global_options": [
+            "--campaign",
+            "--payload",
+            "--summary",
+            "--reason",
+            "--formula",
+            "--context",
+            "--path",
+            "--profile",
+            "--include-hidden",
+            "--full",
+            "--advantage",
+            "--disadvantage",
+            "--keep-highest",
+            "--keep-lowest",
+            "--drop-highest",
+            "--drop-lowest",
+        ],
+        "groups": [{"group": key, "actions": value} for key, value in grouped.items()],
+        "examples": [
+            "dmctl campaign create --campaign demo --name \"Demo\"",
+            "dmctl turn begin --campaign demo",
+            "dmctl state get --campaign demo --path world_state,players",
+            "dmctl validate --campaign demo",
+        ],
+    }
+
+    if group:
+        payload["requested_group"] = group
+        payload["requested_actions"] = grouped.get(group, [])
+    if group and action:
+        payload["requested_action"] = action
+        payload["known_command"] = (group, action) in commands
+
+    return payload
+
+
 def normalize_command(args: argparse.Namespace) -> Tuple[str, str, str]:
     group = args.group
     action = args.action
@@ -5361,6 +5568,7 @@ def error_hint(error: str) -> Optional[str]:
         "unknown_command": "Run `dmctl <group> <action>` with a supported command pair.",
         "turn_diff_not_found": "Commit at least one turn before requesting a turn diff.",
         "checkpoint_missing": "The turn checkpoint file is missing; rollback or restore from backup.",
+        "undo_not_available": "Undo requires an open turn or a committed turn with a retained checkpoint.",
     }
     return hints.get(error)
 
@@ -5373,6 +5581,7 @@ def error_message(error: str) -> str:
         "invalid_json_payload": "The payload could not be parsed as JSON.",
         "validation_failed": "Campaign validation reported one or more errors.",
         "unknown_command": "The requested command is not recognized.",
+        "undo_not_available": "Undo is not available for this campaign state.",
     }
     return mapping.get(error, error.replace("_", " "))
 
@@ -5395,8 +5604,14 @@ def emit_failure(command: str, error: str, details: Optional[Dict[str, Any]] = N
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
     ensure_base_dirs()
+    raw_args = list(argv) if argv is not None else list(sys.argv[1:])
+    if any(flag in raw_args for flag in ("-h", "--help")):
+        positionals = [arg for arg in raw_args if not arg.startswith("-")]
+        group = positionals[0] if len(positionals) >= 1 else None
+        action = positionals[1] if len(positionals) >= 2 else None
+        return emit_success("help", build_help_payload(group, action))
     parser = build_parser()
-    args = parser.parse_args(argv)
+    args = parser.parse_args(raw_args)
 
     try:
         group, action, command_name = normalize_command(args)
