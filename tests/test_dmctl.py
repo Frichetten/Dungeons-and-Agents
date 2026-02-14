@@ -209,6 +209,7 @@ class TestDMCTLQualityGates(unittest.TestCase):
         second = run_dmctl("state", "get", "--campaign", self.campaign_id)
         self.assertEqual(first["data"]["campaign"]["id"], self.campaign_id)
         self.assertEqual(second["data"]["campaign"]["id"], self.campaign_id)
+        self.assertIn("counts", second["data"])
 
     def test_03_combat_flow(self):
         run_dmctl("turn", "begin", "--campaign", self.campaign_id)
@@ -275,7 +276,7 @@ class TestDMCTLQualityGates(unittest.TestCase):
 
         run_dmctl("turn", "commit", "--campaign", self.campaign_id, "--summary", "Combat resolved.")
 
-        state = run_dmctl("state", "get", "--campaign", self.campaign_id, "--include-hidden")
+        state = run_dmctl("state", "get", "--campaign", self.campaign_id, "--include-hidden", "--full")
         raider_rows = [n for n in state["data"]["npcs"] if n["id"] == "npc_raider"]
         self.assertEqual(len(raider_rows), 1)
         self.assertLessEqual(raider_rows[0]["current_hp"], 10)
@@ -329,7 +330,7 @@ class TestDMCTLQualityGates(unittest.TestCase):
 
         run_dmctl("turn", "commit", "--campaign", self.campaign_id, "--summary", "Rumor and secret chain resolved.")
 
-        state = run_dmctl("state", "get", "--campaign", self.campaign_id)
+        state = run_dmctl("state", "get", "--campaign", self.campaign_id, "--full")
         rumor_ids = {r["id"] for r in state["data"]["rumors"]}
         secret_ids = {s["id"] for s in state["data"]["secrets"]}
         self.assertIn("rumor_ashen_vault", rumor_ids)
@@ -338,7 +339,7 @@ class TestDMCTLQualityGates(unittest.TestCase):
     def test_05_rollback(self):
         marker_name = f"RollbackTestItem-{uuid.uuid4().hex[:6]}"
 
-        baseline = run_dmctl("state", "get", "--campaign", self.campaign_id, "--include-hidden")
+        baseline = run_dmctl("state", "get", "--campaign", self.campaign_id, "--include-hidden", "--full")
         before_count = len([i for i in baseline["data"]["inventory"] if i["item_name"] == marker_name])
 
         run_dmctl("turn", "begin", "--campaign", self.campaign_id)
@@ -362,7 +363,7 @@ class TestDMCTLQualityGates(unittest.TestCase):
             payload={"reason": "Rollback test"},
         )
 
-        after = run_dmctl("state", "get", "--campaign", self.campaign_id, "--include-hidden")
+        after = run_dmctl("state", "get", "--campaign", self.campaign_id, "--include-hidden", "--full")
         after_count = len([i for i in after["data"]["inventory"] if i["item_name"] == marker_name])
         self.assertEqual(before_count, after_count)
 

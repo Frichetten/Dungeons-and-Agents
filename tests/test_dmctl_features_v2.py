@@ -181,7 +181,7 @@ class TestDMCTLFeaturesV2(unittest.TestCase):
         self.assertGreaterEqual(pulse["data"]["summary"]["secret_reveals"], 1)
 
         run_dmctl("turn", "commit", "--campaign", self.campaign_id, "--summary", "Pulse and reveal")
-        state = run_dmctl("state", "get", "--campaign", self.campaign_id, "--include-hidden")
+        state = run_dmctl("state", "get", "--campaign", self.campaign_id, "--include-hidden", "--full")
         secret_rows = [s for s in state["data"]["secrets"] if s["id"] == "secret_linked"]
         self.assertEqual(secret_rows[0]["reveal_status"], "revealed")
 
@@ -262,7 +262,30 @@ class TestDMCTLFeaturesV2(unittest.TestCase):
 
         ooc_state = run_dmctl("ooc", "state", "--campaign", self.campaign_id)
         self.assertEqual(ooc_state["data"]["profile"], "player")
-        self.assertNotIn("notes_hidden", ooc_state["data"])
+        self.assertNotIn("recent_hidden_notes", ooc_state["data"])
+
+        state_paths = run_dmctl("state", "get", "--campaign", self.campaign_id, "--path", "world_state,players")
+        self.assertEqual(state_paths["data"]["paths"], ["world_state", "players"])
+        self.assertIn("world_state", state_paths["data"]["values"])
+        self.assertIn("players", state_paths["data"]["values"])
+
+        dashboard = run_dmctl("ooc", "dashboard", "--campaign", self.campaign_id)
+        if dashboard["data"]["latest_turn_diff"]:
+            self.assertIn("diff_summary", dashboard["data"]["latest_turn_diff"])
+            self.assertNotIn("diff", dashboard["data"]["latest_turn_diff"])
+
+        dashboard_full = run_dmctl("ooc", "dashboard", "--campaign", self.campaign_id, "--full")
+        if dashboard_full["data"]["latest_turn_diff"]:
+            self.assertIn("diff", dashboard_full["data"]["latest_turn_diff"])
+
+        recap = run_dmctl("ooc", "recap", "--campaign", self.campaign_id)
+        if recap["data"]["recent_turn_diffs"]:
+            self.assertIn("diff_summary", recap["data"]["recent_turn_diffs"][0])
+            self.assertNotIn("diff", recap["data"]["recent_turn_diffs"][0])
+
+        recap_full = run_dmctl("ooc", "recap", "--campaign", self.campaign_id, "--full")
+        if recap_full["data"]["recent_turn_diffs"]:
+            self.assertIn("diff", recap_full["data"]["recent_turn_diffs"][0])
 
     def test_03_ooc_undo_last_turn(self):
         marker = f"Undo-{uuid.uuid4().hex[:6]}"
@@ -284,7 +307,7 @@ class TestDMCTLFeaturesV2(unittest.TestCase):
         self.assertEqual(undo["command"], "ooc undo_last_turn")
         self.assertEqual(undo["data"]["turn"]["status"], "rolled_back")
 
-        state = run_dmctl("state", "get", "--campaign", self.campaign_id, "--include-hidden")
+        state = run_dmctl("state", "get", "--campaign", self.campaign_id, "--include-hidden", "--full")
         names = {row["item_name"] for row in state["data"]["inventory"]}
         self.assertNotIn(marker, names)
 
