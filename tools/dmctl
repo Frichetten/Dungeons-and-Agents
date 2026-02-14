@@ -19,6 +19,13 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
+from dm.ui_contract import (
+    UI_CONTRACT_VERSION,
+    build_envelope as build_ui_envelope,
+    render_markdown as render_ui_markdown,
+    validate_envelope_or_raise,
+)
+
 SCHEMA_VERSION = 3
 SQLITE_BUSY_TIMEOUT_MS = 5000
 
@@ -844,6 +851,216 @@ def snapshot_reference(campaign_id: str, snapshot: Dict[str, Any]) -> Dict[str, 
         },
         "counts": snapshot.get("counts", {}),
     }
+
+
+def join_lines(lines: Sequence[str], fallback: str = "No update.") -> str:
+    cleaned = [str(line).strip() for line in lines if str(line).strip()]
+    if not cleaned:
+        return fallback
+    return "\n".join(cleaned)
+
+
+def attach_ui_envelope(data: Dict[str, Any], envelope: Dict[str, Any]) -> Dict[str, Any]:
+    validate_envelope_or_raise(envelope)
+    wrapped = dict(data)
+    wrapped["ui_contract_version"] = envelope["ui_contract_version"]
+    wrapped["template_id"] = envelope["template_id"]
+    wrapped["ui"] = envelope
+    wrapped["ui_markdown"] = render_ui_markdown(envelope)
+    return wrapped
+
+
+def build_ooc_panel_envelope(action: str, data: Dict[str, Any]) -> Dict[str, Any]:
+    campaign = data.get("campaign")
+    campaign_line = "Campaign: unknown"
+    if isinstance(campaign, dict):
+        campaign_name = campaign.get("name") or campaign.get("id") or "unknown"
+        campaign_line = f"Campaign: {campaign_name}"
+    elif isinstance(campaign, str) and campaign:
+        campaign_line = f"Campaign: {campaign}"
+
+    overview_lines = [f"Panel: /{action}", campaign_line]
+
+    resources: List[str] = []
+    if isinstance(data.get("pc"), dict):
+        pc = data["pc"]
+        resources.append(
+            f"PC {pc.get('name', pc.get('id', 'Unknown'))}: HP {pc.get('current_hp', '?')}/{pc.get('max_hp', '?')}, AC {pc.get('ac', '?')}"
+        )
+    if isinstance(data.get("inventory"), list):
+        resources.append(f"Inventory rows: {len(data['inventory'])}")
+    counts = data.get("counts")
+    if isinstance(counts, dict):
+        resources.extend([f"{key}: {value}" for key, value in counts.items()])
+    if isinstance(data.get("active_encounter"), dict) and data["active_encounter"].get("id"):
+        resources.append(
+            f"Active encounter: {data['active_encounter'].get('name', data['active_encounter'].get('id'))}"
+        )
+
+    objectives: List[str] = []
+    open_quests = data.get("open_quests")
+    if isinstance(open_quests, list):
+        objectives.extend(
+            [f"Quest: {row.get('title', row.get('id', 'unknown'))} [{row.get('status', 'unknown')}]" for row in open_quests[:4]]
+        )
+    open_threads = data.get("open_threads")
+    if isinstance(open_threads, list):
+        objectives.extend([f"Thread: {item}" for item in open_threads[:4]])
+    if isinstance(data.get("quests"), list):
+        objectives.extend(
+            [f"Quest: {row.get('title', row.get('id', 'unknown'))} [{row.get('status', 'unknown')}]" for row in data["quests"][:4]]
+        )
+
+    world_lines: List[str] = []
+    if isinstance(data.get("time"), dict):
+        time_data = data["time"]
+        world_lines.append(
+            f"Time: {time_data.get('world_date', '?')} {time_data.get('world_time', '?')} ({time_data.get('weather', 'unknown')})"
+        )
+    if isinstance(data.get("current_location"), dict):
+        loc = data["current_location"]
+        world_lines.append(f"Location: {loc.get('location_name', loc.get('location_id', 'Unknown'))}")
+    if isinstance(data.get("world_state"), dict):
+        ws = data["world_state"]
+        world_lines.append(
+            f"World: {ws.get('world_date', '?')} {ws.get('world_time', '?')} in {ws.get('region', 'Unknown')}"
+        )
+
+    sections = [
+        {"id": "overview", "label": "Overview", "content": join_lines(overview_lines)},
+        {"id": "resources", "label": "Resources", "content": join_lines(resources)},
+        {"id": "objectives", "label": "Objectives", "content": join_lines(objectives)},
+        {"id": "world", "label": "World", "content": join_lines(world_lines)},
+    ]
+    return build_ui_envelope(
+        "ooc_panel",
+        f"OOC Panel - /{action}",
+        sections=sections,
+        choices=[],
+        freeform_hint="",
+        prompt="",
+    )
+
+
+def build_scene_turn_envelope(title: str, sections_by_id: Dict[str, str]) -> Dict[str, Any]:
+    return build_ui_envelope("scene_turn", title, section_content=sections_by_id)
+
+
+def build_combat_start_envelope(data: Dict[str, Any]) -> Dict[str, Any]:
+    combatants = data.get("combatants", [])
+    combatant_lines = [
+        f"{row.get('name', 'Unknown')} init {row.get('initiative', '?')} HP {row.get('current_hp', '?')}/{row.get('max_hp', '?')}"
+        for row in combatants
+    ]
+    sections = [
+        {
+            "id": "scene",
+            "label": "Scene",
+            "content": f"Encounter {data.get('encounter_id', 'unknown')} begins. Round {data.get('round', 1)}.",
+        },
+        {
+            "id": "mechanics",
+            "label": "Mechanics",
+            "content": f"Turn index {data.get('turn_index', 0)}. Initiative order established for {len(combatants)} combatants.",
+        },
+        {"id": "rolls", "label": "Rolls", "content": "Initiative rolled for each participant and logged."},
+        {"id": "outcome", "label": "Outcome", "content": join_lines(combatant_lines, fallback="No combatants were created.")},
+        {"id": "state_diff", "label": "State Diff", "content": f"Encounter active: {data.get('encounter_id', 'unknown')}."},
+        {"id": "open_threads", "label": "Open Threads", "content": "Choose the first tactical action for the active combatant."},
+    ]
+    return build_ui_envelope("combat_turn", f"Round {data.get('round', 1)} - Combat Starts", sections=sections)
+
+
+def build_combat_turn_envelope(data: Dict[str, Any]) -> Dict[str, Any]:
+    current_actor = data.get("current_actor", {}) if isinstance(data.get("current_actor"), dict) else {}
+    next_actor = data.get("next_actor", {}) if isinstance(data.get("next_actor"), dict) else {}
+    combatants = data.get("combatants", [])
+
+    state_diff_lines: List[str] = []
+    if isinstance(combatants, list):
+        for row in combatants:
+            if not isinstance(row, dict):
+                continue
+            state_diff_lines.append(
+                f"{row.get('name', row.get('id', 'Unknown'))}: HP {row.get('current_hp', '?')}/{row.get('max_hp', '?')}"
+            )
+
+    sections = [
+        {
+            "id": "scene",
+            "label": "Scene",
+            "content": f"Round {data.get('round', '?')} in encounter {data.get('encounter_id', 'unknown')}.",
+        },
+        {
+            "id": "mechanics",
+            "label": "Mechanics",
+            "content": join_lines(
+                [
+                    f"Actor: {current_actor.get('name', current_actor.get('id', 'Unknown'))}",
+                    f"Action Type: {data.get('action_type', 'action')}",
+                    f"Bonus Action used: {bool(data.get('bonus_action'))}",
+                    f"Reaction mode: {bool(data.get('reaction'))}",
+                    f"Movement used: {data.get('movement_ft', 0)} ft",
+                ]
+            ),
+        },
+        {
+            "id": "rolls",
+            "label": "Rolls",
+            "content": "Resolved using command payloads and persisted combat state.",
+        },
+        {
+            "id": "outcome",
+            "label": "Outcome",
+            "content": join_lines(
+                [
+                    f"Action: {data.get('action', 'acts')}",
+                    f"Next actor: {next_actor.get('name', next_actor.get('id', 'Unknown'))}",
+                    str(data.get("round_summary", "")).strip(),
+                ]
+            ),
+        },
+        {"id": "state_diff", "label": "State Diff", "content": join_lines(state_diff_lines)},
+        {
+            "id": "open_threads",
+            "label": "Open Threads",
+            "content": join_lines(
+                [
+                    f"Concentration broken: {bool(data.get('concentration_broken'))}",
+                    f"Round effects: {json.dumps(data.get('round_effects', {}), separators=(',', ':'))}",
+                ]
+            ),
+        },
+    ]
+    actor_name = current_actor.get("name", "Current Actor")
+    return build_ui_envelope("combat_turn", f"Round {data.get('round', '?')} - {actor_name}", sections=sections)
+
+
+def build_system_error_envelope(command: str, error: str, details: Dict[str, Any]) -> Dict[str, Any]:
+    hint = details.get("hint", "")
+    rollback_required = error in {
+        "checkpoint_missing",
+        "checkpoint_checksum_mismatch",
+        "rollback_backup_missing",
+    }
+    sections = [
+        {
+            "id": "error",
+            "label": "Error",
+            "content": join_lines([f"Command: {command}", f"Failure: {error}", str(details.get('message', ''))]),
+        },
+        {
+            "id": "rollback",
+            "label": "Rollback",
+            "content": "Rollback recommended before retry." if rollback_required else "Rollback not required for this error.",
+        },
+        {
+            "id": "recovery",
+            "label": "Recovery",
+            "content": join_lines([str(hint), "Use OOC commands to inspect state and retry safely."]),
+        },
+    ]
+    return build_ui_envelope("system_error", f"Command Failure - {command}", sections=sections)
 
 
 def compact_state_view(data: Dict[str, Any], include_hidden: bool) -> Dict[str, Any]:
@@ -5526,17 +5743,21 @@ def command_ooc(args: argparse.Namespace, payload: Dict[str, Any]) -> Tuple[Dict
     campaign_id = require_campaign(args.campaign)
     action = args.action
 
+    def ooc_response(data: Dict[str, Any], warnings: Optional[List[str]] = None) -> Tuple[Dict[str, Any], List[str]]:
+        return (attach_ui_envelope(data, build_ooc_panel_envelope(action, data)), warnings or [])
+
     if action == "recap":
         return command_recap_generate(args, payload)
 
     if action == "state":
         if "profile" not in payload:
             payload = {**payload, "profile": "player"}
-        return command_state_get(args, payload)
+        data, warnings = command_state_get(args, payload)
+        return ooc_response(data, warnings)
 
     if action == "savepoint":
         backup = command_campaign_backup(args, payload)[0]
-        return (backup, [])
+        return ooc_response(backup)
 
     if action == "undo_last_turn":
         reason = str(args.reason or payload.get("reason") or "ooc undo_last_turn")
@@ -5545,7 +5766,8 @@ def command_ooc(args: argparse.Namespace, payload: Dict[str, Any]) -> Tuple[Dict
         if open_turn is not None:
             conn.close()
             rollback_payload = {"reason": reason}
-            return command_turn_rollback(args, rollback_payload)
+            rollback_data, warnings = command_turn_rollback(args, rollback_payload)
+            return ooc_response(rollback_data, warnings)
 
         last_turn = conn.execute(
             """
@@ -5630,7 +5852,7 @@ def command_ooc(args: argparse.Namespace, payload: Dict[str, Any]) -> Tuple[Dict
         snapshot = write_snapshot(conn2, campaign_id)
         conn2.commit()
         conn2.close()
-        return (
+        return ooc_response(
             {
                 "campaign": campaign_id,
                 "turn": {
@@ -5642,8 +5864,7 @@ def command_ooc(args: argparse.Namespace, payload: Dict[str, Any]) -> Tuple[Dict
                 },
                 "restored_committed_events": restored_committed,
                 "snapshot_ref": snapshot_reference(campaign_id, snapshot),
-            },
-            [],
+            }
         )
 
     conn = connect_campaign_db(campaign_id)
@@ -5676,7 +5897,7 @@ def command_ooc(args: argparse.Namespace, payload: Dict[str, Any]) -> Tuple[Dict
             )
         )
         conn.close()
-        return ({"pc": as_dict(pc), "inventory": inventory}, [])
+        return ooc_response({"pc": as_dict(pc), "inventory": inventory})
 
     if action == "inventory":
         owner_type = payload.get("owner_type")
@@ -5697,12 +5918,12 @@ def command_ooc(args: argparse.Namespace, payload: Dict[str, Any]) -> Tuple[Dict
         query += " ORDER BY i.owner_type, i.owner_id, it.name"
         rows = to_jsonable(conn.execute(query, tuple(params)))
         conn.close()
-        return ({"inventory": rows}, [])
+        return ooc_response({"inventory": rows})
 
     if action == "quests":
         rows = to_jsonable(conn.execute("SELECT * FROM quests WHERE campaign_id = ? ORDER BY created_at", (campaign_id,)))
         conn.close()
-        return ({"quests": rows}, [])
+        return ooc_response({"quests": rows})
 
     if action == "rumors":
         rows = to_jsonable(
@@ -5712,7 +5933,7 @@ def command_ooc(args: argparse.Namespace, payload: Dict[str, Any]) -> Tuple[Dict
             )
         )
         conn.close()
-        return ({"rumors": rows}, [])
+        return ooc_response({"rumors": rows})
 
     if action == "npcs":
         rows = to_jsonable(
@@ -5722,7 +5943,7 @@ def command_ooc(args: argparse.Namespace, payload: Dict[str, Any]) -> Tuple[Dict
             )
         )
         conn.close()
-        return ({"npcs": rows}, [])
+        return ooc_response({"npcs": rows})
 
     if action == "relationships":
         rows = to_jsonable(
@@ -5732,12 +5953,12 @@ def command_ooc(args: argparse.Namespace, payload: Dict[str, Any]) -> Tuple[Dict
             )
         )
         conn.close()
-        return ({"relationships": rows}, [])
+        return ooc_response({"relationships": rows})
 
     if action == "factions":
         rows = to_jsonable(conn.execute("SELECT * FROM factions WHERE campaign_id = ? ORDER BY name", (campaign_id,)))
         conn.close()
-        return ({"factions": rows}, [])
+        return ooc_response({"factions": rows})
 
     if action == "time":
         row = conn.execute(
@@ -5745,7 +5966,7 @@ def command_ooc(args: argparse.Namespace, payload: Dict[str, Any]) -> Tuple[Dict
             (campaign_id,),
         ).fetchone()
         conn.close()
-        return ({"time": as_dict(row)}, [])
+        return ooc_response({"time": as_dict(row)})
 
     if action == "map":
         locations = to_jsonable(conn.execute("SELECT * FROM locations WHERE campaign_id = ? ORDER BY name", (campaign_id,)))
@@ -5760,7 +5981,7 @@ def command_ooc(args: argparse.Namespace, payload: Dict[str, Any]) -> Tuple[Dict
             (campaign_id,),
         ).fetchone()
         conn.close()
-        return ({"current_location": as_dict(world), "locations": locations, "routes": routes}, [])
+        return ooc_response({"current_location": as_dict(world), "locations": locations, "routes": routes})
 
     if action == "dashboard":
         full_response = response_full(args, payload)
@@ -5803,7 +6024,7 @@ def command_ooc(args: argparse.Namespace, payload: Dict[str, Any]) -> Tuple[Dict
             limit=max(1, safe_int(payload.get("hooks_limit", 8), "hooks_limit")),
         )
         conn.close()
-        return (
+        return ooc_response(
             {
                 "campaign": as_dict(campaign),
                 "open_turn": as_dict(open_turn),
@@ -5813,8 +6034,7 @@ def command_ooc(args: argparse.Namespace, payload: Dict[str, Any]) -> Tuple[Dict
                 "active_pressures": active_pressures,
                 "next_payoff_hooks": next_payoff_hooks,
                 "latest_turn_diff": latest_turn_diff,
-            },
-            [],
+            }
         )
 
     conn.close()
@@ -6034,16 +6254,15 @@ def command_combat_start(args: argparse.Namespace, payload: Dict[str, Any]) -> T
     )
     conn.close()
 
-    return (
-        {
-            "encounter_id": encounter_id,
-            "round": 1,
-            "turn_index": 0,
-            "combatants": combatants,
-            "turn_id": turn_id,
-        },
-        [],
-    )
+    response_data = {
+        "encounter_id": encounter_id,
+        "round": 1,
+        "turn_index": 0,
+        "combatants": combatants,
+        "turn_id": turn_id,
+    }
+    response_data = attach_ui_envelope(response_data, build_combat_start_envelope(response_data))
+    return (response_data, [])
 
 
 def command_combat_act(args: argparse.Namespace, payload: Dict[str, Any]) -> Tuple[Dict[str, Any], List[str]]:
@@ -6359,26 +6578,25 @@ def command_combat_act(args: argparse.Namespace, payload: Dict[str, Any]) -> Tup
     next_actor = latest[next_turn_index] if latest else None
     conn.close()
 
-    return (
-        {
-            "encounter_id": encounter_id,
-            "round": round_number,
-            "current_actor": as_dict(acting_row),
-            "next_actor": as_dict(next_actor),
-            "action": action_summary,
-            "action_type": action_type,
-            "reaction": reaction_mode,
-            "bonus_action": use_bonus,
-            "movement_ft": movement_ft,
-            "concentration_broken": concentration_broken,
-            "concentration_target_id": concentration_target_id,
-            "round_summary": round_summary,
-            "round_effects": round_effects,
-            "combatants": [as_dict(row) for row in latest],
-            "turn_id": turn_id,
-        },
-        [],
-    )
+    response_data = {
+        "encounter_id": encounter_id,
+        "round": round_number,
+        "current_actor": as_dict(acting_row),
+        "next_actor": as_dict(next_actor),
+        "action": action_summary,
+        "action_type": action_type,
+        "reaction": reaction_mode,
+        "bonus_action": use_bonus,
+        "movement_ft": movement_ft,
+        "concentration_broken": concentration_broken,
+        "concentration_target_id": concentration_target_id,
+        "round_summary": round_summary,
+        "round_effects": round_effects,
+        "combatants": [as_dict(row) for row in latest],
+        "turn_id": turn_id,
+    }
+    response_data = attach_ui_envelope(response_data, build_combat_turn_envelope(response_data))
+    return (response_data, [])
 
 
 def command_combat_resolve(args: argparse.Namespace, payload: Dict[str, Any]) -> Tuple[Dict[str, Any], List[str]]:
@@ -6667,7 +6885,27 @@ def command_combat_end(args: argparse.Namespace, payload: Dict[str, Any]) -> Tup
     updated = conn.execute("SELECT * FROM encounters WHERE id = ?", (encounter_id,)).fetchone()
     conn.close()
 
-    return ({"encounter": as_dict(updated), "turn_id": turn_id}, [])
+    response_data = {"encounter": as_dict(updated), "turn_id": turn_id}
+    encounter_data = response_data["encounter"]
+    response_data = attach_ui_envelope(
+        response_data,
+        build_scene_turn_envelope(
+            f"Encounter Ended - {encounter_data.get('name', encounter_data.get('id', encounter_id))}",
+            {
+                "scene": "The active encounter is now resolved.",
+                "mechanics": join_lines(
+                    [
+                        f"Status: {encounter_data.get('status', 'ended')}",
+                        f"Ended at: {encounter_data.get('ended_at', ended_at)}",
+                    ]
+                ),
+                "outcome": str(encounter_data.get("notes", "") or "Combat state was committed and logged."),
+                "state_diff": f"Encounter {encounter_id} changed to ended.",
+                "open_threads": "Commit or continue with post-combat actions.",
+            },
+        ),
+    )
+    return (response_data, [])
 
 
 def command_recap_generate(args: argparse.Namespace, payload: Dict[str, Any]) -> Tuple[Dict[str, Any], List[str]]:
@@ -6860,6 +7098,37 @@ def command_recap_generate(args: argparse.Namespace, payload: Dict[str, Any]) ->
     }
     if not full_response:
         recap_data["recent_turn_diffs_mode"] = "summary"
+
+    state_diff_lines = [
+        (
+            f"Turn {row.get('turn_number')}: "
+            f"resources={row.get('diff_summary', {}).get('hp_resources_changed', 0)}, "
+            f"inventory={row.get('diff_summary', {}).get('inventory_changed', 0)}, "
+            f"relationships={row.get('diff_summary', {}).get('relationships_changed', 0)}, "
+            f"quests={row.get('diff_summary', {}).get('quests_changed', 0)}"
+        )
+        for row in diff_summaries
+    ]
+    recap_data = attach_ui_envelope(
+        recap_data,
+        build_scene_turn_envelope(
+            f"Campaign Recap - {campaign_id}",
+            {
+                "scene": f"Current world time: {world['world_date']} {world['world_time']} in {world['region']}.",
+                "mechanics": join_lines(
+                    [
+                        f"Recent turns captured: {len(turns)}",
+                        f"Open quests: {len(open_quests)}",
+                        f"Known rumors: {len(rumors)}",
+                        f"Active clocks: {len(active_clocks)}",
+                    ]
+                ),
+                "outcome": recap_text,
+                "state_diff": join_lines(state_diff_lines),
+                "open_threads": join_lines([str(item) for item in hooks]),
+            },
+        ),
+    )
 
     return (recap_data, [])
 
@@ -7128,6 +7397,14 @@ def emit_failure(command: str, error: str, details: Optional[Dict[str, Any]] = N
         "error": error,
         "details": payload,
     }
+    try:
+        envelope = build_system_error_envelope(command, error, payload)
+        response["ui_contract_version"] = UI_CONTRACT_VERSION
+        response["template_id"] = envelope["template_id"]
+        response["ui"] = envelope
+        response["ui_markdown"] = render_ui_markdown(envelope)
+    except Exception:
+        pass
     print(json.dumps(response, separators=(",", ":"), ensure_ascii=True))
     return 1
 
