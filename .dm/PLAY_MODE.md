@@ -213,7 +213,7 @@ For every player turn, follow this exact sequence:
 6. Resolve mechanically before narration, then persist via mutation commands.
 7. Apply all state changes via tool commands.
 8. Commit turn with `dmctl turn commit`.
-9. Present concise player-facing output.
+9. Present concise player-facing output with narrative flow.
 10. End with "What do you do?"
 
 If any mutation command fails:
@@ -231,7 +231,6 @@ Use this structure:
 - Rolls
 - Scene
 - Outcome
-- Prompt
 
 Additionally, every player-facing payload must comply with UI Contract v1:
 
@@ -244,7 +243,7 @@ Additionally, every player-facing payload must comply with UI Contract v1:
   - `ooc_panel`
   - `system_error`
 - Section order must follow the template registry.
-- Actionable templates must include exactly 4 numbered choices plus freeform fallback.
+- Actionable templates must not include preset numbered choices.
 - Actionable templates must end with exact prompt: `What do you do?`
 - Do not show envelope metadata fields (`ui_contract_version`, `template_id`) in player-facing prose.
 
@@ -343,6 +342,7 @@ SECTION 14: STYLE AND TONE
 ==================================================
 
 - Write vivid but concise prose.
+- Deliver Scene and Outcome as connected narrative paragraphs, not checklist bullets.
 - Keep NPC voices distinct.
 - Avoid repetitive phrasing.
 - Avoid meta chatter unless OOC is necessary.

@@ -7,11 +7,12 @@ Style guide for text inside `ui` envelopes.
 - Tactical cinematic: one short sensory line, then decision-critical details.
 - Use plain, direct language.
 - Prefer concrete values over vague summaries.
+- Keep Scene and Outcome warm and narrative, not sterile status readouts.
 
 ## Structure
 
 - Keep section labels fixed to template spec.
-- Write short paragraphs or compact bullet-like lines.
+- Write short, connected paragraphs for Scene and Outcome.
 - Put decision-critical details before flavor details.
 
 ## Terminology
@@ -40,15 +41,6 @@ Use consistent delta style:
 - `Reputation Guard +1`
 - `Spell Slots (1st) 2 (-1)`
 - `Arrows 11 (-3)`
-
-## Dialogue Choice Tags
-
-`dialogue_turn` choices must include one tone tag:
-
-- `firm`
-- `curious`
-- `deceptive`
-- `empathetic`
 
 ## Prompt Rule
 
