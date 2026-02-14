@@ -436,15 +436,70 @@ def ensure_item(
     item_id: Optional[str],
     item_name: Optional[str],
     defaults: Optional[Dict[str, Any]] = None,
+    *,
+    create_if_missing: bool = False,
 ) -> str:
     if item_id:
+        normalized_item_id = str(item_id)
         row = conn.execute(
             "SELECT id FROM items WHERE campaign_id = ? AND id = ?",
-            (campaign_id, item_id),
+            (campaign_id, normalized_item_id),
         ).fetchone()
-        if row is None:
-            raise DMError("item_not_found", {"campaign": campaign_id, "item_id": item_id})
-        return item_id
+        if row is not None:
+            return normalized_item_id
+
+        if not create_if_missing:
+            raise DMError("item_not_found", {"campaign": campaign_id, "item_id": normalized_item_id})
+
+        if not item_name:
+            raise DMError(
+                "item_not_found",
+                {
+                    "campaign": campaign_id,
+                    "item_id": normalized_item_id,
+                    "hint": "Provide item_name to create a missing item by explicit item_id.",
+                },
+            )
+
+        name_row = conn.execute(
+            "SELECT id FROM items WHERE campaign_id = ? AND name = ?",
+            (campaign_id, item_name),
+        ).fetchone()
+        if name_row is not None:
+            existing_item_id = str(name_row["id"])
+            raise DMError(
+                "item_id_name_conflict",
+                {
+                    "campaign": campaign_id,
+                    "item_id": normalized_item_id,
+                    "item_name": item_name,
+                    "existing_item_id": existing_item_id,
+                },
+            )
+
+        defaults = defaults or {}
+        ts = now_iso()
+        conn.execute(
+            """
+            INSERT INTO items (
+                id, campaign_id, name, description, stackable, consumable,
+                max_charges, charges, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                normalized_item_id,
+                campaign_id,
+                item_name,
+                str(defaults.get("description", "")),
+                1 if defaults.get("stackable", True) else 0,
+                1 if defaults.get("consumable", False) else 0,
+                safe_int(defaults.get("max_charges", 0), "max_charges"),
+                safe_int(defaults.get("charges", 0), "charges"),
+                ts,
+                ts,
+            ),
+        )
+        return normalized_item_id
 
     if not item_name:
         raise DMError("item_identity_required", {"required": ["item_id", "item_name"]})
@@ -480,6 +535,53 @@ def ensure_item(
         ),
     )
     return new_item_id
+
+
+QUEST_STATUS_ALLOWED = ("open", "in_progress", "completed", "failed")
+QUEST_OBJECTIVE_STATUS_ALLOWED = ("open", "complete", "failed")
+
+QUEST_STATUS_ALIASES = {
+    "open": "open",
+    "in_progress": "in_progress",
+    "inprogress": "in_progress",
+    "active": "in_progress",
+    "complete": "completed",
+    "completed": "completed",
+    "done": "completed",
+    "failed": "failed",
+    "failure": "failed",
+}
+
+QUEST_OBJECTIVE_STATUS_ALIASES = {
+    "open": "open",
+    "complete": "complete",
+    "completed": "complete",
+    "done": "complete",
+    "failed": "failed",
+    "failure": "failed",
+}
+
+
+def normalize_quest_status(value: Any, *, field: str = "status") -> str:
+    token = str(value).strip().lower().replace("-", "_").replace(" ", "_")
+    normalized = QUEST_STATUS_ALIASES.get(token)
+    if normalized is None:
+        raise DMError(
+            "invalid_quest_status",
+            {"field": field, "status": value, "allowed": list(QUEST_STATUS_ALLOWED)},
+        )
+    return normalized
+
+
+def normalize_objective_status(value: Any, *, field: str = "status") -> str:
+    token = str(value).strip().lower().replace("-", "_").replace(" ", "_")
+    normalized = QUEST_OBJECTIVE_STATUS_ALIASES.get(token)
+    if normalized is None:
+        raise DMError(
+            "invalid_objective_status",
+            {"field": field, "status": value, "allowed": list(QUEST_OBJECTIVE_STATUS_ALLOWED)},
+        )
+    return normalized
 
 
 def upsert_inventory_quantity(
@@ -3932,7 +4034,14 @@ def apply_reward_grants(
             quantity = safe_int(item.get("quantity", 1), "quantity")
             if quantity == 0:
                 continue
-            item_id = ensure_item(conn, campaign_id, item.get("item_id"), item.get("item_name"), item)
+            item_id = ensure_item(
+                conn,
+                campaign_id,
+                item.get("item_id"),
+                item.get("item_name"),
+                item,
+                create_if_missing=True,
+            )
             new_quantity = upsert_inventory_quantity(conn, campaign_id, owner_type, owner_id, item_id, quantity)
             applied["items"].append(
                 {
@@ -4059,6 +4168,8 @@ def command_quest_add(args: argparse.Namespace, payload: Dict[str, Any]) -> Tupl
     quest_id = payload.get("id") or uuid_id("quest")
     ts = now_iso()
 
+    quest_status = normalize_quest_status(payload.get("status", "open"), field="status")
+
     conn.execute(
         """
         INSERT INTO quests (
@@ -4071,7 +4182,7 @@ def command_quest_add(args: argparse.Namespace, payload: Dict[str, Any]) -> Tupl
             campaign_id,
             str(title),
             str(payload.get("description", "")),
-            str(payload.get("status", "open")),
+            quest_status,
             1 if payload.get("is_main_arc", False) else 0,
             payload.get("source_npc_id"),
             str(payload.get("reward_text", "")),
@@ -4089,6 +4200,12 @@ def command_quest_add(args: argparse.Namespace, payload: Dict[str, Any]) -> Tupl
         if not isinstance(objectives, list):
             raise DMError("invalid_objectives", {"error": "objectives must be a list"})
         for idx, objective in enumerate(objectives):
+            if not isinstance(objective, dict):
+                raise DMError("invalid_objective_update", {"objective": objective})
+            objective_status = normalize_objective_status(
+                objective.get("status", "open"),
+                field=f"objectives[{idx}].status",
+            )
             conn.execute(
                 """
                 INSERT INTO quest_objectives (id, quest_id, description, status, order_index, updated_at)
@@ -4098,7 +4215,7 @@ def command_quest_add(args: argparse.Namespace, payload: Dict[str, Any]) -> Tupl
                     objective.get("id") or uuid_id("obj"),
                     quest_id,
                     str(objective.get("description", "Objective")),
-                    str(objective.get("status", "open")),
+                    objective_status,
                     safe_int(objective.get("order_index", idx), "order_index"),
                     ts,
                 ),
@@ -4135,8 +4252,11 @@ def command_quest_update(args: argparse.Namespace, payload: Dict[str, Any]) -> T
     values: List[Any] = []
     for key in ["title", "description", "status", "is_main_arc", "source_npc_id", "reward_text", "auto_grant"]:
         if key in payload:
+            value = payload[key]
+            if key == "status":
+                value = normalize_quest_status(value, field="status")
             updates.append(f"{key} = ?")
-            values.append(payload[key])
+            values.append(value)
     if "reward" in payload:
         updates.append("reward_json = ?")
         values.append(json.dumps(payload["reward"], separators=(",", ":")))
@@ -4158,24 +4278,61 @@ def command_quest_update(args: argparse.Namespace, payload: Dict[str, Any]) -> T
             tuple(values),
         )
 
-    for objective in payload.get("objective_updates", []):
+    objective_updates = payload.get("objective_updates", [])
+    if objective_updates and not isinstance(objective_updates, list):
+        raise DMError("invalid_objective_update", {"error": "objective_updates must be a list"})
+
+    for index, objective in enumerate(objective_updates):
         if not isinstance(objective, dict):
             raise DMError("invalid_objective_update", {"objective": objective})
+        objective_status = (
+            normalize_objective_status(objective["status"], field=f"objective_updates[{index}].status")
+            if "status" in objective
+            else None
+        )
         obj_id = objective.get("id")
         if obj_id:
+            obj_id_str = str(obj_id)
+            existing_objective = conn.execute(
+                "SELECT id FROM quest_objectives WHERE id = ? AND quest_id = ?",
+                (obj_id_str, quest_id),
+            ).fetchone()
+
+            if existing_objective is None:
+                conn.execute(
+                    """
+                    INSERT INTO quest_objectives (id, quest_id, description, status, order_index, updated_at)
+                    VALUES (?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        obj_id_str,
+                        quest_id,
+                        str(objective.get("description", "Objective")),
+                        objective_status or normalize_objective_status("open", field=f"objective_updates[{index}].status"),
+                        safe_int(objective.get("order_index", 0), "order_index"),
+                        now_iso(),
+                    ),
+                )
+                continue
+
             fields: List[str] = []
             params: List[Any] = []
-            for key in ["description", "status", "order_index"]:
-                if key in objective:
-                    fields.append(f"{key} = ?")
-                    params.append(objective[key])
+            if "description" in objective:
+                fields.append("description = ?")
+                params.append(objective["description"])
+            if objective_status is not None:
+                fields.append("status = ?")
+                params.append(objective_status)
+            if "order_index" in objective:
+                fields.append("order_index = ?")
+                params.append(objective["order_index"])
             if not fields:
                 continue
             fields.append("updated_at = ?")
             params.append(now_iso())
-            params.append(obj_id)
+            params.extend([obj_id_str, quest_id])
             conn.execute(
-                f"UPDATE quest_objectives SET {', '.join(fields)} WHERE id = ?",
+                f"UPDATE quest_objectives SET {', '.join(fields)} WHERE id = ? AND quest_id = ?",
                 tuple(params),
             )
         else:
@@ -4188,7 +4345,7 @@ def command_quest_update(args: argparse.Namespace, payload: Dict[str, Any]) -> T
                     uuid_id("obj"),
                     quest_id,
                     str(objective.get("description", "Objective")),
-                    str(objective.get("status", "open")),
+                    objective_status or normalize_objective_status("open", field=f"objective_updates[{index}].status"),
                     safe_int(objective.get("order_index", 0), "order_index"),
                     now_iso(),
                 ),
@@ -4629,7 +4786,14 @@ def command_item_grant(args: argparse.Namespace, payload: Dict[str, Any]) -> Tup
     turn = require_open_turn(conn, campaign_id)
     turn_id = safe_int(turn["id"], "turn_id")
 
-    item_id = ensure_item(conn, campaign_id, payload.get("item_id"), payload.get("item_name"), payload)
+    item_id = ensure_item(
+        conn,
+        campaign_id,
+        payload.get("item_id"),
+        payload.get("item_name"),
+        payload,
+        create_if_missing=True,
+    )
     new_quantity = upsert_inventory_quantity(conn, campaign_id, owner_type, owner_id, item_id, quantity)
 
     persist_event(
@@ -5359,7 +5523,14 @@ def command_travel_resolve(args: argparse.Namespace, payload: Dict[str, Any]) ->
                 (campaign_id,),
             )
         )
-        item_id = ensure_item(conn, campaign_id, payload.get("ration_item_id"), ration_name, {"stackable": True, "consumable": True})
+        item_id = ensure_item(
+            conn,
+            campaign_id,
+            payload.get("ration_item_id"),
+            ration_name,
+            {"stackable": True, "consumable": True},
+            create_if_missing=True,
+        )
         for pc in pcs:
             try:
                 upsert_inventory_quantity(conn, campaign_id, "pc", pc["id"], item_id, -1)
@@ -7323,6 +7494,9 @@ def error_hint(error: str) -> Optional[str]:
         "turn_diff_not_found": "Commit at least one turn before requesting a turn diff.",
         "checkpoint_missing": "The turn checkpoint file is missing; rollback or restore from backup.",
         "undo_not_available": "Undo requires an open turn or a committed turn with a retained checkpoint.",
+        "invalid_quest_status": "Use quest status: open, in_progress, completed, or failed.",
+        "invalid_objective_status": "Use objective status: open, complete, or failed.",
+        "item_id_name_conflict": "Use the existing item_id for that item name, or choose a unique item_name.",
     }
     return hints.get(error)
 
@@ -7336,6 +7510,9 @@ def error_message(error: str) -> str:
         "validation_failed": "Campaign validation reported one or more errors.",
         "unknown_command": "The requested command is not recognized.",
         "undo_not_available": "Undo is not available for this campaign state.",
+        "invalid_quest_status": "Quest status value is invalid.",
+        "invalid_objective_status": "Quest objective status value is invalid.",
+        "item_id_name_conflict": "The provided item_id conflicts with an existing item_name.",
     }
     return mapping.get(error, error.replace("_", " "))
 
