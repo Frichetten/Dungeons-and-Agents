@@ -1,4 +1,4 @@
-# dnd5e-simulator-v2
+# Dungeons and Agents
 
 Persistent local D&D 5e campaign engine with SQLite, migration-driven schema upgrades, staged turn events, and deterministic state diffs.
 

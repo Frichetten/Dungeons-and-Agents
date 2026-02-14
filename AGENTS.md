@@ -3,7 +3,7 @@
 You are Codex, running a persistent D&D 5e DM agent with local tools and durable state.
 
 Project root:
-- /Users/nick/Documents/dnd5e-simulator-v2
+- /Users/nick/Documents/Dungeons and Agents
 
 Primary objective:
 - Let a player run a full campaign where you do world simulation, dice, rules adjudication, NPC roleplay, story pacing, and continuity.
@@ -50,16 +50,16 @@ SECTION 3: REQUIRED FILE LAYOUT
 
 Create and use this layout:
 
-- /Users/nick/Documents/dnd5e-simulator-v2/.dm/
-- /Users/nick/Documents/dnd5e-simulator-v2/.dm/campaigns/
-- /Users/nick/Documents/dnd5e-simulator-v2/.dm/templates/
-- /Users/nick/Documents/dnd5e-simulator-v2/.dm/backups/
-- /Users/nick/Documents/dnd5e-simulator-v2/tools/
-- /Users/nick/Documents/dnd5e-simulator-v2/tools/dm/
-- /Users/nick/Documents/dnd5e-simulator-v2/tools/dmctl (executable entrypoint)
-- /Users/nick/Documents/dnd5e-simulator-v2/tools/dm/schema.sql
-- /Users/nick/Documents/dnd5e-simulator-v2/tools/dm/migrations/
-- /Users/nick/Documents/dnd5e-simulator-v2/tests/
+- /Users/nick/Documents/Dungeons and Agents/.dm/
+- /Users/nick/Documents/Dungeons and Agents/.dm/campaigns/
+- /Users/nick/Documents/Dungeons and Agents/.dm/templates/
+- /Users/nick/Documents/Dungeons and Agents/.dm/backups/
+- /Users/nick/Documents/Dungeons and Agents/tools/
+- /Users/nick/Documents/Dungeons and Agents/tools/dm/
+- /Users/nick/Documents/Dungeons and Agents/tools/dmctl (executable entrypoint)
+- /Users/nick/Documents/Dungeons and Agents/tools/dm/schema.sql
+- /Users/nick/Documents/Dungeons and Agents/tools/dm/migrations/
+- /Users/nick/Documents/Dungeons and Agents/tests/
 
 ==================================================
 SECTION 4: STATE BACKEND REQUIREMENTS
@@ -68,10 +68,10 @@ SECTION 4: STATE BACKEND REQUIREMENTS
 Use SQLite as source of truth plus append-only event log.
 
 Per campaign store:
-- SQLite DB: /Users/nick/Documents/dnd5e-simulator-v2/.dm/campaigns/<campaign_id>/campaign.db
-- Event log: /Users/nick/Documents/dnd5e-simulator-v2/.dm/campaigns/<campaign_id>/events.ndjson
-- Snapshot: /Users/nick/Documents/dnd5e-simulator-v2/.dm/campaigns/<campaign_id>/snapshot.json
-- Transcript: /Users/nick/Documents/dnd5e-simulator-v2/.dm/campaigns/<campaign_id>/transcript.md
+- SQLite DB: /Users/nick/Documents/Dungeons and Agents/.dm/campaigns/<campaign_id>/campaign.db
+- Event log: /Users/nick/Documents/Dungeons and Agents/.dm/campaigns/<campaign_id>/events.ndjson
+- Snapshot: /Users/nick/Documents/Dungeons and Agents/.dm/campaigns/<campaign_id>/snapshot.json
+- Transcript: /Users/nick/Documents/Dungeons and Agents/.dm/campaigns/<campaign_id>/transcript.md
 
 Persistence rules:
 - Every turn writes a transaction.
@@ -133,7 +133,7 @@ Invariants:
 SECTION 6: REQUIRED CLI TOOLS
 ==================================================
 
-Create `/Users/nick/Documents/dnd5e-simulator-v2/tools/dmctl` as the single executable.
+Create `/Users/nick/Documents/Dungeons and Agents/tools/dmctl` as the single executable.
 All commands must return JSON only.
 
 Response shape success:
