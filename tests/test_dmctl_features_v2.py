@@ -311,6 +311,118 @@ class TestDMCTLFeaturesV2(unittest.TestCase):
         names = {row["item_name"] for row in state["data"]["inventory"]}
         self.assertNotIn(marker, names)
 
+    def test_04_help_returns_json(self):
+        result = subprocess.run([str(DMCTL), "--help"], capture_output=True, text=True, cwd=str(ROOT), check=False)
+        body = json.loads(result.stdout.strip())
+        self.assertTrue(body["ok"])
+        self.assertEqual(body["command"], "help")
+        self.assertIn("groups", body["data"])
+        self.assertGreater(len(body["data"]["groups"]), 0)
+
+        campaign_help = run_dmctl("campaign", "--help")
+        self.assertEqual(campaign_help["command"], "help")
+        self.assertEqual(campaign_help["data"]["requested_group"], "campaign")
+        self.assertIn("create", campaign_help["data"]["requested_actions"])
+
+        prefixed_help = subprocess.run(
+            [str(DMCTL), "--campaign", "demo", "campaign", "--help"],
+            capture_output=True,
+            text=True,
+            cwd=str(ROOT),
+            check=False,
+        )
+        prefixed_body = json.loads(prefixed_help.stdout.strip())
+        self.assertTrue(prefixed_body["ok"])
+        self.assertEqual(prefixed_body["data"]["requested_group"], "campaign")
+
+    def test_05_ooc_undo_last_committed_turn(self):
+        marker = f"CommittedUndo-{uuid.uuid4().hex[:6]}"
+        run_dmctl("turn", "begin", "--campaign", self.campaign_id)
+        run_dmctl(
+            "item",
+            "grant",
+            "--campaign",
+            self.campaign_id,
+            payload={
+                "owner_type": "pc",
+                "owner_id": "pc_hero",
+                "item_name": marker,
+                "quantity": 1,
+            },
+        )
+        run_dmctl("turn", "commit", "--campaign", self.campaign_id, "--summary", "Add marker for committed undo")
+
+        pre_undo = run_dmctl("state", "get", "--campaign", self.campaign_id, "--full")
+        names_before = {row["item_name"] for row in pre_undo["data"]["inventory"]}
+        self.assertIn(marker, names_before)
+
+        undo = run_dmctl("ooc", "undo_last_turn", "--campaign", self.campaign_id)
+        self.assertEqual(undo["command"], "ooc undo_last_turn")
+        self.assertEqual(undo["data"]["turn"]["status"], "rolled_back")
+        self.assertEqual(undo["data"]["turn"]["mode"], "committed")
+        self.assertEqual(undo["data"]["turn"]["reason"], "ooc undo_last_turn")
+
+        run_dmctl("turn", "begin", "--campaign", self.campaign_id)
+        run_dmctl(
+            "item",
+            "grant",
+            "--campaign",
+            self.campaign_id,
+            payload={
+                "owner_type": "pc",
+                "owner_id": "pc_hero",
+                "item_name": f"{marker}-2",
+                "quantity": 1,
+            },
+        )
+        run_dmctl("turn", "commit", "--campaign", self.campaign_id, "--summary", "Add marker for reason passthrough")
+        custom_reason = "manual custom undo reason"
+        undo_with_reason = run_dmctl(
+            "ooc",
+            "undo_last_turn",
+            "--campaign",
+            self.campaign_id,
+            "--reason",
+            custom_reason,
+        )
+        self.assertEqual(undo_with_reason["data"]["turn"]["reason"], custom_reason)
+
+        post_undo = run_dmctl("state", "get", "--campaign", self.campaign_id, "--full")
+        names_after = {row["item_name"] for row in post_undo["data"]["inventory"]}
+        self.assertNotIn(marker, names_after)
+        self.assertNotIn(f"{marker}-2", names_after)
+
+        validate = run_dmctl("validate", "--campaign", self.campaign_id)
+        self.assertTrue(validate["ok"])
+
+    def test_06_dashboard_and_recap_use_latest_turn_order(self):
+        for idx in range(2):
+            run_dmctl("turn", "begin", "--campaign", self.campaign_id)
+            run_dmctl(
+                "world",
+                "pulse",
+                "--campaign",
+                self.campaign_id,
+                payload={"hours": 0, "add_hooks": [f"hook_{idx}"]},
+            )
+            run_dmctl("turn", "commit", "--campaign", self.campaign_id, "--summary", f"Ordering turn {idx}")
+
+        db_path = CAMPAIGNS_ROOT / self.campaign_id / "campaign.db"
+        conn = sqlite3.connect(db_path)
+        latest_turn_number = conn.execute(
+            "SELECT MAX(turn_number) FROM turns WHERE status = 'committed'"
+        ).fetchone()[0]
+        conn.close()
+
+        dashboard = run_dmctl("ooc", "dashboard", "--campaign", self.campaign_id)
+        self.assertEqual(dashboard["data"]["latest_turn_diff"]["turn_number"], latest_turn_number)
+
+        recap = run_dmctl("recap", "generate", "--campaign", self.campaign_id, payload={"limit": 3})
+        turn_numbers = [row["turn_number"] for row in recap["data"]["recent_turn_diffs"]]
+        self.assertGreaterEqual(len(turn_numbers), 1)
+        self.assertEqual(turn_numbers[0], latest_turn_number)
+        self.assertEqual(turn_numbers, sorted(turn_numbers, reverse=True))
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
