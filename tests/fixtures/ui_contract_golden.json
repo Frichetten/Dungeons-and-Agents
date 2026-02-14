@@ -6,14 +6,14 @@
       "title": "Scene Turn Example",
       "sections": [
         {
+          "id": "rolls",
+          "label": "Rolls",
+          "content": "Low visibility. Difficult terrain near the gap."
+        },
+        {
           "id": "scene",
           "label": "Scene",
           "content": "Fog coils around the ruined bridge."
-        },
-        {
-          "id": "mechanics",
-          "label": "Mechanics",
-          "content": "Low visibility. Difficult terrain near the gap."
         },
         {
           "id": "outcome",
@@ -50,7 +50,7 @@
       "freeform_hint": "Or describe another action.",
       "prompt": "What do you do?"
     },
-    "rendered": "### Scene Turn Example\nScene:\nFog coils around the ruined bridge.\nMechanics:\nLow visibility. Difficult terrain near the gap.\nOutcome:\nYou hold position and assess the crossing.\nChoices:\n1. Press forward carefully (Intent: Action; Risk: Low)\n2. Ask a clarifying question (Intent: Action; Risk: Low)\n3. Set up an advantage (Intent: Action; Risk: Medium)\n4. Take the risky shortcut (Intent: Action; Risk: High)\nOr describe another action.\nWhat do you do?"
+    "rendered": "### Scene Turn Example\nRolls:\nLow visibility. Difficult terrain near the gap.\nScene:\nFog coils around the ruined bridge.\nOutcome:\nYou hold position and assess the crossing.\nChoices:\n1. Press forward carefully (Intent: Action; Risk: Low)\n2. Ask a clarifying question (Intent: Action; Risk: Low)\n3. Set up an advantage (Intent: Action; Risk: Medium)\n4. Take the risky shortcut (Intent: Action; Risk: High)\nOr describe another action.\nWhat do you do?"
   },
   "dialogue_turn": {
     "envelope": {
@@ -59,14 +59,14 @@
       "title": "Dialogue Turn Example",
       "sections": [
         {
+          "id": "rolls",
+          "label": "Rolls",
+          "content": "Social stakes: trust can rise or fall."
+        },
+        {
           "id": "scene",
           "label": "Scene",
           "content": "Mayor Elira waits, guarded but attentive."
-        },
-        {
-          "id": "mechanics",
-          "label": "Mechanics",
-          "content": "Social stakes: trust can rise or fall."
         },
         {
           "id": "outcome",
@@ -107,7 +107,7 @@
       "freeform_hint": "Or describe another action.",
       "prompt": "What do you do?"
     },
-    "rendered": "### Dialogue Turn Example\nScene:\nMayor Elira waits, guarded but attentive.\nMechanics:\nSocial stakes: trust can rise or fall.\nOutcome:\nShe asks what proof you have.\nChoices:\n1. Firm demand (Intent: Action; Risk: Medium; Tone: firm)\n2. Curious probe (Intent: Action; Risk: Low; Tone: curious)\n3. Deceptive bluff (Intent: Action; Risk: High; Tone: deceptive)\n4. Empathetic appeal (Intent: Action; Risk: Low; Tone: empathetic)\nOr describe another action.\nWhat do you do?"
+    "rendered": "### Dialogue Turn Example\nRolls:\nSocial stakes: trust can rise or fall.\nScene:\nMayor Elira waits, guarded but attentive.\nOutcome:\nShe asks what proof you have.\nChoices:\n1. Firm demand (Intent: Action; Risk: Medium; Tone: firm)\n2. Curious probe (Intent: Action; Risk: Low; Tone: curious)\n3. Deceptive bluff (Intent: Action; Risk: High; Tone: deceptive)\n4. Empathetic appeal (Intent: Action; Risk: Low; Tone: empathetic)\nOr describe another action.\nWhat do you do?"
   },
   "combat_turn": {
     "envelope": {
@@ -116,19 +116,14 @@
       "title": "Combat Turn Example",
       "sections": [
         {
-          "id": "scene",
-          "label": "Scene",
-          "content": "Round 2 in the Old Keep courtyard."
-        },
-        {
-          "id": "mechanics",
-          "label": "Mechanics",
-          "content": "Action ready. Bonus Action unused. Movement 0/30."
-        },
-        {
           "id": "rolls",
           "label": "Rolls",
           "content": "Attack roll pending for your declared strike."
+        },
+        {
+          "id": "scene",
+          "label": "Scene",
+          "content": "Round 2 in the Old Keep courtyard."
         },
         {
           "id": "outcome",
@@ -165,7 +160,7 @@
       "freeform_hint": "Or describe another action.",
       "prompt": "What do you do?"
     },
-    "rendered": "### Combat Turn Example\nScene:\nRound 2 in the Old Keep courtyard.\nMechanics:\nAction ready. Bonus Action unused. Movement 0/30.\nRolls:\nAttack roll pending for your declared strike.\nOutcome:\nThe raider circles left while you hold center.\nChoices:\n1. Strike the nearest threat (Intent: Action; Risk: Medium)\n2. Disengage to cover (Intent: Action+Move; Risk: Low)\n3. Use a resource now (Intent: Bonus; Risk: Low)\n4. Support an ally setup (Intent: Action; Risk: Medium)\nOr describe another action.\nWhat do you do?"
+    "rendered": "### Combat Turn Example\nRolls:\nAttack roll pending for your declared strike.\nScene:\nRound 2 in the Old Keep courtyard.\nOutcome:\nThe raider circles left while you hold center.\nChoices:\n1. Strike the nearest threat (Intent: Action; Risk: Medium)\n2. Disengage to cover (Intent: Action+Move; Risk: Low)\n3. Use a resource now (Intent: Bonus; Risk: Low)\n4. Support an ally setup (Intent: Action; Risk: Medium)\nOr describe another action.\nWhat do you do?"
   },
   "exploration_turn": {
     "envelope": {
@@ -174,14 +169,14 @@
       "title": "Exploration Turn Example",
       "sections": [
         {
+          "id": "rolls",
+          "label": "Rolls",
+          "content": "Torchlight is low. Noise risks patrol attention."
+        },
+        {
           "id": "scene",
           "label": "Scene",
           "content": "The crypt corridor forks beside a collapsed wall."
-        },
-        {
-          "id": "mechanics",
-          "label": "Mechanics",
-          "content": "Torchlight is low. Noise risks patrol attention."
         },
         {
           "id": "outcome",
@@ -218,7 +213,7 @@
       "freeform_hint": "Or describe another action.",
       "prompt": "What do you do?"
     },
-    "rendered": "### Exploration Turn Example\nScene:\nThe crypt corridor forks beside a collapsed wall.\nMechanics:\nTorchlight is low. Noise risks patrol attention.\nOutcome:\nYou pause at the junction to choose direction.\nChoices:\n1. Investigate the area (Intent: Action; Risk: Medium)\n2. Interact with a feature (Intent: Action; Risk: Low)\n3. Navigate onward (Intent: Action; Risk: Medium)\n4. Take a short rest (Intent: Action; Risk: Low)\nOr describe another action.\nWhat do you do?"
+    "rendered": "### Exploration Turn Example\nRolls:\nTorchlight is low. Noise risks patrol attention.\nScene:\nThe crypt corridor forks beside a collapsed wall.\nOutcome:\nYou pause at the junction to choose direction.\nChoices:\n1. Investigate the area (Intent: Action; Risk: Medium)\n2. Interact with a feature (Intent: Action; Risk: Low)\n3. Navigate onward (Intent: Action; Risk: Medium)\n4. Take a short rest (Intent: Action; Risk: Low)\nOr describe another action.\nWhat do you do?"
   },
   "skill_check_turn": {
     "envelope": {
@@ -227,19 +222,14 @@
       "title": "Skill Check Turn Example",
       "sections": [
         {
-          "id": "scene",
-          "label": "Scene",
-          "content": "A locked iron gate blocks the vault stairs."
-        },
-        {
-          "id": "mechanics",
-          "label": "Mechanics",
-          "content": "Declared approach: thieves' tools. DC band: challenging."
-        },
-        {
           "id": "rolls",
           "label": "Rolls",
           "content": "Roll 14 + 5 = 19."
+        },
+        {
+          "id": "scene",
+          "label": "Scene",
+          "content": "A locked iron gate blocks the vault stairs."
         },
         {
           "id": "outcome",
@@ -276,7 +266,7 @@
       "freeform_hint": "Or describe another action.",
       "prompt": "What do you do?"
     },
-    "rendered": "### Skill Check Turn Example\nScene:\nA locked iron gate blocks the vault stairs.\nMechanics:\nDeclared approach: thieves' tools. DC band: challenging.\nRolls:\nRoll 14 + 5 = 19.\nOutcome:\nThe gate opens with a loud click.\nChoices:\n1. Attempt a direct approach (Intent: Action; Risk: Medium)\n2. Use tools or gear (Intent: Action; Risk: Low)\n3. Assist an ally (Intent: Action; Risk: Low)\n4. Force a high-risk attempt (Intent: Action; Risk: High)\nOr describe another action.\nWhat do you do?"
+    "rendered": "### Skill Check Turn Example\nRolls:\nRoll 14 + 5 = 19.\nScene:\nA locked iron gate blocks the vault stairs.\nOutcome:\nThe gate opens with a loud click.\nChoices:\n1. Attempt a direct approach (Intent: Action; Risk: Medium)\n2. Use tools or gear (Intent: Action; Risk: Low)\n3. Assist an ally (Intent: Action; Risk: Low)\n4. Force a high-risk attempt (Intent: Action; Risk: High)\nOr describe another action.\nWhat do you do?"
   },
   "ooc_panel": {
     "envelope": {

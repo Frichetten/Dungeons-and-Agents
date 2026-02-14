@@ -4,7 +4,7 @@ Style guide for text inside `ui` envelopes.
 
 ## Voice
 
-- Tactical cinematic: one short sensory line, then mechanics.
+- Tactical cinematic: one short sensory line, then decision-critical details.
 - Use plain, direct language.
 - Prefer concrete values over vague summaries.
 
@@ -12,7 +12,7 @@ Style guide for text inside `ui` envelopes.
 
 - Keep section labels fixed to template spec.
 - Write short paragraphs or compact bullet-like lines.
-- Put decision-critical mechanics before flavor details.
+- Put decision-critical details before flavor details.
 
 ## Terminology
 
@@ -29,7 +29,7 @@ Use canonical terms exactly:
 
 - Show numbers when they change decisions.
 - Hide backend noise (raw internals, debug IDs, irrelevant fields).
-- For high-pressure states (combat/hazards), keep flavor to one sentence max before mechanics.
+- For high-pressure states (combat/hazards), keep flavor to one sentence max before critical details.
 
 ## Delta Notation
 

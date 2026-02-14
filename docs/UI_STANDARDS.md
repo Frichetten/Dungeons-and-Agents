@@ -5,7 +5,7 @@ This document defines the strict player-facing UI contract used by runtime respo
 ## Contract Goals
 
 - Use one chat-first envelope for all player-facing output.
-- Keep tactical-cinematic tone: one short flavor line, then decision-critical mechanics.
+- Keep tactical-cinematic tone: one short flavor line, then decision-critical details.
 - Use four default choices plus a freeform fallback on actionable templates.
 - Enforce section order, section labels, and prompt consistency.
 
@@ -29,9 +29,8 @@ Version is fixed at `1.0`.
   "template_id": "combat_turn",
   "title": "Round 2 - Arin's Turn",
   "sections": [
-    {"id":"scene","label":"Scene","content":"..."},
-    {"id":"mechanics","label":"Mechanics","content":"..."},
     {"id":"rolls","label":"Rolls","content":"..."},
+    {"id":"scene","label":"Scene","content":"..."},
     {"id":"outcome","label":"Outcome","content":"..."}
   ],
   "choices": [
@@ -48,16 +47,16 @@ Version is fixed at `1.0`.
 ## Template Registry
 
 - `scene_turn`
-  - Sections: `scene`, `mechanics`, `outcome`
+  - Sections: `rolls`, `scene`, `outcome`
 - `dialogue_turn`
-  - Sections: `scene`, `mechanics`, `outcome`
+  - Sections: `rolls`, `scene`, `outcome`
   - Choice tone tags required: `firm`, `curious`, `deceptive`, `empathetic`
 - `combat_turn`
-  - Sections: `scene`, `mechanics`, `rolls`, `outcome`
+  - Sections: `rolls`, `scene`, `outcome`
 - `exploration_turn`
-  - Sections: `scene`, `mechanics`, `outcome`
+  - Sections: `rolls`, `scene`, `outcome`
 - `skill_check_turn`
-  - Sections: `scene`, `mechanics`, `rolls`, `outcome`
+  - Sections: `rolls`, `scene`, `outcome`
 - `ooc_panel`
   - Sections: `overview`, `resources`, `objectives`, `world`
   - Non-actionable: no choices, no prompt

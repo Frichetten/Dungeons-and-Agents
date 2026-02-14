@@ -52,8 +52,8 @@ TEMPLATE_REGISTRY: Dict[str, TemplateSpec] = {
     "scene_turn": TemplateSpec(
         template_id="scene_turn",
         required_sections=(
+            _sec("rolls", "Rolls"),
             _sec("scene", "Scene"),
-            _sec("mechanics", "Mechanics"),
             _sec("outcome", "Outcome"),
         ),
         actionable=True,
@@ -62,8 +62,8 @@ TEMPLATE_REGISTRY: Dict[str, TemplateSpec] = {
     "dialogue_turn": TemplateSpec(
         template_id="dialogue_turn",
         required_sections=(
+            _sec("rolls", "Rolls"),
             _sec("scene", "Scene"),
-            _sec("mechanics", "Mechanics"),
             _sec("outcome", "Outcome"),
         ),
         actionable=True,
@@ -72,9 +72,8 @@ TEMPLATE_REGISTRY: Dict[str, TemplateSpec] = {
     "combat_turn": TemplateSpec(
         template_id="combat_turn",
         required_sections=(
-            _sec("scene", "Scene"),
-            _sec("mechanics", "Mechanics"),
             _sec("rolls", "Rolls"),
+            _sec("scene", "Scene"),
             _sec("outcome", "Outcome"),
         ),
         actionable=True,
@@ -83,8 +82,8 @@ TEMPLATE_REGISTRY: Dict[str, TemplateSpec] = {
     "exploration_turn": TemplateSpec(
         template_id="exploration_turn",
         required_sections=(
+            _sec("rolls", "Rolls"),
             _sec("scene", "Scene"),
-            _sec("mechanics", "Mechanics"),
             _sec("outcome", "Outcome"),
         ),
         actionable=True,
@@ -93,9 +92,8 @@ TEMPLATE_REGISTRY: Dict[str, TemplateSpec] = {
     "skill_check_turn": TemplateSpec(
         template_id="skill_check_turn",
         required_sections=(
-            _sec("scene", "Scene"),
-            _sec("mechanics", "Mechanics"),
             _sec("rolls", "Rolls"),
+            _sec("scene", "Scene"),
             _sec("outcome", "Outcome"),
         ),
         actionable=True,

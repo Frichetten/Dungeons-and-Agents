@@ -228,9 +228,8 @@ SECTION 8: PLAYER-FACING OUTPUT FORMAT
 
 Use this structure:
 
-- Scene
-- Mechanics
 - Rolls
+- Scene
 - Outcome
 - Prompt
 
