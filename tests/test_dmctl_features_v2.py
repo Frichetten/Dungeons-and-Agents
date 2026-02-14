@@ -1,0 +1,293 @@
+import json
+import shutil
+import sqlite3
+import subprocess
+import unittest
+import uuid
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[1]
+DMCTL = ROOT / "tools" / "dmctl"
+CAMPAIGNS_ROOT = ROOT / ".dm" / "campaigns"
+
+
+def run_dmctl(*parts, payload=None, expect_ok=True):
+    cmd = [str(DMCTL), *parts]
+    if payload is not None:
+        cmd.extend(["--payload", json.dumps(payload, separators=(",", ":"))])
+
+    result = subprocess.run(cmd, capture_output=True, text=True, cwd=str(ROOT), check=False)
+    try:
+        body = json.loads(result.stdout.strip())
+    except json.JSONDecodeError as exc:
+        raise AssertionError(
+            f"Command did not return JSON. CMD={cmd} STDOUT={result.stdout} STDERR={result.stderr}"
+        ) from exc
+
+    if expect_ok and not body.get("ok"):
+        raise AssertionError(f"Command failed unexpectedly. CMD={cmd} BODY={body} STDERR={result.stderr}")
+    if not expect_ok and body.get("ok"):
+        raise AssertionError(f"Command unexpectedly succeeded. CMD={cmd} BODY={body}")
+    return body
+
+
+class TestDMCTLFeaturesV2(unittest.TestCase):
+    def setUp(self):
+        self.campaign_id = f"feat_{uuid.uuid4().hex[:10]}"
+        run_dmctl("campaign", "create", "--campaign", self.campaign_id, "--name", "Features V2")
+        run_dmctl("turn", "begin", "--campaign", self.campaign_id)
+        run_dmctl(
+            "campaign",
+            "seed",
+            "--campaign",
+            self.campaign_id,
+            payload={
+                "locations": [
+                    {"id": "loc_start", "name": "Larkspur", "region": "Greenmarch"},
+                    {"id": "loc_keep", "name": "Old Keep", "region": "Greenmarch"},
+                ],
+                "player_characters": [
+                    {
+                        "id": "pc_hero",
+                        "name": "Arin Vale",
+                        "class": "Rogue",
+                        "level": 3,
+                        "max_hp": 24,
+                        "current_hp": 24,
+                        "ac": 15,
+                        "location_id": "loc_start",
+                        "initiative_mod": 3,
+                    }
+                ],
+                "npcs": [
+                    {"id": "npc_mayor", "name": "Mayor Elira Thorn", "location_id": "loc_start", "max_hp": 11, "current_hp": 11, "ac": 12},
+                    {"id": "npc_sergeant", "name": "Sergeant Bram", "location_id": "loc_start", "max_hp": 12, "current_hp": 12, "ac": 13},
+                    {"id": "npc_scholar", "name": "Scholar Nyx", "location_id": "loc_start", "max_hp": 9, "current_hp": 9, "ac": 11},
+                ],
+                "world_state": {
+                    "world_date": "2 Ches 1492 DR",
+                    "world_time": "10:00",
+                    "weather": "clear",
+                    "region": "Greenmarch",
+                    "location_id": "loc_start",
+                },
+            },
+        )
+        run_dmctl("turn", "commit", "--campaign", self.campaign_id, "--summary", "Feature baseline")
+
+    def tearDown(self):
+        cdir = CAMPAIGNS_ROOT / self.campaign_id
+        if cdir.exists():
+            shutil.rmtree(cdir)
+
+    def test_00_dice_expression_and_flags(self):
+        expr = run_dmctl(
+            "dice",
+            "roll",
+            "--campaign",
+            self.campaign_id,
+            "--formula",
+            "2d6+1d4+3",
+            "--context",
+            "feature_expression",
+        )
+        self.assertEqual(expr["data"]["modifier"], 3)
+        self.assertGreaterEqual(len(expr["data"]["raw_dice"]), 3)
+
+        kd = run_dmctl(
+            "dice",
+            "roll",
+            "--campaign",
+            self.campaign_id,
+            "--formula",
+            "4d6",
+            "--keep-highest",
+            "3",
+            "--drop-lowest",
+            "1",
+            "--context",
+            "feature_keep_drop",
+        )
+        self.assertEqual(len(kd["data"]["selected_dice"]), 3)
+
+        bad = run_dmctl(
+            "dice",
+            "roll",
+            "--campaign",
+            self.campaign_id,
+            "--formula",
+            "2d6+1d4",
+            "--keep-highest",
+            "1",
+            expect_ok=False,
+        )
+        self.assertEqual(bad["error"], "invalid_roll_flags")
+
+    def test_01_world_pulse_rumor_secret_link(self):
+        run_dmctl("turn", "begin", "--campaign", self.campaign_id)
+
+        run_dmctl(
+            "rumor",
+            "add",
+            "--campaign",
+            self.campaign_id,
+            payload={
+                "id": "rumor_linked",
+                "text": "A hidden chapel vault exists.",
+                "source": "Stablehand",
+                "truth_status": "true",
+                "spread_level": 1,
+                "decay": 0,
+            },
+        )
+        run_dmctl(
+            "secret",
+            "add",
+            "--campaign",
+            self.campaign_id,
+            payload={
+                "id": "secret_linked",
+                "text": "The vault key rests in the mayor's cane.",
+                "discovery_condition": "Rumor matures",
+                "associated_rumor_id": "rumor_linked",
+            },
+        )
+        run_dmctl(
+            "rumor",
+            "reveal",
+            "--campaign",
+            self.campaign_id,
+            payload={"rumor_id": "rumor_linked"},
+        )
+
+        conn = sqlite3.connect(CAMPAIGNS_ROOT / self.campaign_id / "campaign.db")
+        conn.execute(
+            """
+            INSERT INTO rumor_links (id, campaign_id, rumor_id, secret_id, min_spread_level, auto_reveal, created_at, updated_at)
+            VALUES (?, ?, ?, ?, 1, 1, datetime('now'), datetime('now'))
+            """,
+            (f"link_{uuid.uuid4().hex[:8]}", self.campaign_id, "rumor_linked", "secret_linked"),
+        )
+        conn.commit()
+        conn.close()
+
+        pulse = run_dmctl(
+            "world",
+            "pulse",
+            "--campaign",
+            self.campaign_id,
+            payload={"hours": 1, "rumor_spread_shift": 1, "rumor_decay_step": 0, "add_hooks": ["Check the chapel crypt"]},
+        )
+        self.assertGreaterEqual(pulse["data"]["summary"]["secret_reveals"], 1)
+
+        run_dmctl("turn", "commit", "--campaign", self.campaign_id, "--summary", "Pulse and reveal")
+        state = run_dmctl("state", "get", "--campaign", self.campaign_id, "--include-hidden")
+        secret_rows = [s for s in state["data"]["secrets"] if s["id"] == "secret_linked"]
+        self.assertEqual(secret_rows[0]["reveal_status"], "revealed")
+
+    def test_02_rest_travel_spell_and_ooc(self):
+        run_dmctl("turn", "begin", "--campaign", self.campaign_id)
+
+        run_dmctl(
+            "state",
+            "set",
+            "--campaign",
+            self.campaign_id,
+            payload={
+                "player_characters": [
+                    {
+                        "id": "pc_hero",
+                        "name": "Arin Vale",
+                        "max_hp": 24,
+                        "current_hp": 6,
+                        "ac": 15,
+                        "location_id": "loc_start",
+                    }
+                ]
+            },
+        )
+
+        rest = run_dmctl(
+            "rest",
+            "resolve",
+            "--campaign",
+            self.campaign_id,
+            payload={"rest_type": "long"},
+        )
+        self.assertEqual(rest["data"]["rest_type"], "long")
+        self.assertEqual(rest["data"]["updated_pcs"][0]["current_hp"], 24)
+
+        travel = run_dmctl(
+            "travel",
+            "resolve",
+            "--campaign",
+            self.campaign_id,
+            payload={"to_location_id": "loc_keep", "travel_hours": 2},
+        )
+        self.assertEqual(travel["data"]["destination_id"], "loc_keep")
+
+        cast = run_dmctl(
+            "spell",
+            "cast",
+            "--campaign",
+            self.campaign_id,
+            payload={
+                "caster_type": "pc",
+                "caster_id": "pc_hero",
+                "spell_name": "Invisibility",
+                "remaining_rounds": 10,
+                "requires_concentration": True,
+            },
+        )
+        self.assertEqual(cast["data"]["spell"]["spell_name"], "Invisibility")
+
+        run_dmctl(
+            "spell",
+            "end",
+            "--campaign",
+            self.campaign_id,
+            payload={"spell_id": cast["data"]["spell"]["id"]},
+        )
+
+        run_dmctl("turn", "commit", "--campaign", self.campaign_id, "--summary", "Rest travel spell")
+
+        sheet = run_dmctl("ooc", "sheet", "--campaign", self.campaign_id, payload={"pc_id": "pc_hero"})
+        self.assertEqual(sheet["data"]["pc"]["id"], "pc_hero")
+
+        ooc_time = run_dmctl("ooc", "time", "--campaign", self.campaign_id)
+        self.assertIn("world_time", ooc_time["data"]["time"])
+
+        ooc_map = run_dmctl("ooc", "map", "--campaign", self.campaign_id)
+        self.assertEqual(ooc_map["data"]["current_location"]["location_id"], "loc_keep")
+
+        ooc_state = run_dmctl("ooc", "state", "--campaign", self.campaign_id)
+        self.assertEqual(ooc_state["data"]["profile"], "player")
+        self.assertNotIn("notes_hidden", ooc_state["data"])
+
+    def test_03_ooc_undo_last_turn(self):
+        marker = f"Undo-{uuid.uuid4().hex[:6]}"
+        run_dmctl("turn", "begin", "--campaign", self.campaign_id)
+        run_dmctl(
+            "item",
+            "grant",
+            "--campaign",
+            self.campaign_id,
+            payload={
+                "owner_type": "pc",
+                "owner_id": "pc_hero",
+                "item_name": marker,
+                "quantity": 1,
+            },
+        )
+
+        undo = run_dmctl("ooc", "undo_last_turn", "--campaign", self.campaign_id)
+        self.assertEqual(undo["command"], "ooc undo_last_turn")
+        self.assertEqual(undo["data"]["turn"]["status"], "rolled_back")
+
+        state = run_dmctl("state", "get", "--campaign", self.campaign_id, "--include-hidden")
+        names = {row["item_name"] for row in state["data"]["inventory"]}
+        self.assertNotIn(marker, names)
+
+
+if __name__ == "__main__":
+    unittest.main(verbosity=2)

@@ -1,0 +1,18 @@
+{
+  "campaign_create": {
+    "command": "campaign create",
+    "data_keys": ["campaign", "name", "created", "paths", "snapshot"]
+  },
+  "turn_begin": {
+    "command": "turn begin",
+    "data_keys": ["campaign", "turn", "continuity", "continuity_summary"]
+  },
+  "turn_commit": {
+    "command": "turn commit",
+    "data_keys": ["campaign", "turn", "turn_diff", "staged_events_flushed", "snapshot"]
+  },
+  "turn_diff": {
+    "command": "turn diff",
+    "data_keys": ["campaign", "turn_id", "turn_number", "created_at", "diff"]
+  }
+}
