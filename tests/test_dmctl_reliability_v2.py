@@ -255,6 +255,124 @@ class TestDMCTLReliabilityV2(unittest.TestCase):
             if cdir.exists():
                 shutil.rmtree(cdir)
 
+    def test_05_item_grant_creates_missing_explicit_item_id(self):
+        explicit_item_id = f"item_explicit_{uuid.uuid4().hex[:6]}"
+        item_name = f"Trace Fiber {uuid.uuid4().hex[:6]}"
+
+        run_dmctl("turn", "begin", "--campaign", self.campaign_id)
+        granted = run_dmctl(
+            "item",
+            "grant",
+            "--campaign",
+            self.campaign_id,
+            payload={
+                "owner_type": "pc",
+                "owner_id": "pc_hero",
+                "item_id": explicit_item_id,
+                "item_name": item_name,
+                "stackable": False,
+                "quantity": 1,
+            },
+        )
+        self.assertEqual(granted["data"]["item"]["id"], explicit_item_id)
+        run_dmctl("turn", "commit", "--campaign", self.campaign_id, "--summary", "explicit item grant")
+
+        state = run_dmctl("state", "get", "--campaign", self.campaign_id, "--include-hidden", "--full")
+        names = {row["item_name"] for row in state["data"]["inventory"]}
+        self.assertIn(item_name, names)
+
+    def test_06_quest_update_normalizes_status_and_validates_objectives(self):
+        run_dmctl("turn", "begin", "--campaign", self.campaign_id)
+        run_dmctl(
+            "quest",
+            "add",
+            "--campaign",
+            self.campaign_id,
+            payload={
+                "id": "quest_status_norm",
+                "title": "Status Normalization Drill",
+                "description": "Exercise quest/objective status handling.",
+            },
+        )
+        updated = run_dmctl(
+            "quest",
+            "update",
+            "--campaign",
+            self.campaign_id,
+            payload={
+                "quest_id": "quest_status_norm",
+                "status": "complete",
+                "objective_updates": [
+                    {
+                        "id": "obj_status_norm",
+                        "description": "Interview the witness.",
+                        "status": "completed",
+                        "order_index": 0,
+                    }
+                ],
+            },
+        )
+        self.assertEqual(updated["data"]["quest"]["status"], "completed")
+        objective = [row for row in updated["data"]["objectives"] if row["id"] == "obj_status_norm"]
+        self.assertEqual(len(objective), 1)
+        self.assertEqual(objective[0]["status"], "complete")
+        run_dmctl("turn", "commit", "--campaign", self.campaign_id, "--summary", "status normalization")
+
+        run_dmctl("turn", "begin", "--campaign", self.campaign_id)
+        bad = run_dmctl(
+            "quest",
+            "update",
+            "--campaign",
+            self.campaign_id,
+            payload={
+                "quest_id": "quest_status_norm",
+                "objective_updates": [{"id": "obj_bad_status", "status": "nonsense"}],
+            },
+            expect_ok=False,
+        )
+        self.assertEqual(bad["error"], "invalid_objective_status")
+        run_dmctl("turn", "rollback", "--campaign", self.campaign_id, payload={"reason": "invalid objective status"})
+
+    def test_07_quest_update_rejects_objective_id_from_other_quest(self):
+        run_dmctl("turn", "begin", "--campaign", self.campaign_id)
+        run_dmctl(
+            "quest",
+            "add",
+            "--campaign",
+            self.campaign_id,
+            payload={
+                "id": "quest_alpha",
+                "title": "Alpha Quest",
+                "objectives": [{"id": "obj_shared_id", "description": "Alpha objective", "status": "open"}],
+            },
+        )
+        run_dmctl(
+            "quest",
+            "add",
+            "--campaign",
+            self.campaign_id,
+            payload={
+                "id": "quest_beta",
+                "title": "Beta Quest",
+            },
+        )
+        conflict = run_dmctl(
+            "quest",
+            "update",
+            "--campaign",
+            self.campaign_id,
+            payload={
+                "quest_id": "quest_beta",
+                "objective_updates": [{"id": "obj_shared_id", "description": "Wrong quest objective reuse"}],
+            },
+            expect_ok=False,
+        )
+        self.assertEqual(conflict["error"], "objective_id_conflict")
+        self.assertEqual(conflict["details"]["objective_id"], "obj_shared_id")
+        self.assertEqual(conflict["details"]["quest_id"], "quest_beta")
+        self.assertEqual(conflict["details"]["existing_quest_id"], "quest_alpha")
+        run_dmctl("turn", "rollback", "--campaign", self.campaign_id, payload={"reason": "objective id conflict"})
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
