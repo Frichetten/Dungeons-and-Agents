@@ -21,36 +21,11 @@
           "content": "You hold position and assess the crossing."
         }
       ],
-      "choices": [
-        {
-          "id": "1",
-          "label": "Press forward carefully",
-          "intent": "Action",
-          "risk": "Low"
-        },
-        {
-          "id": "2",
-          "label": "Ask a clarifying question",
-          "intent": "Action",
-          "risk": "Low"
-        },
-        {
-          "id": "3",
-          "label": "Set up an advantage",
-          "intent": "Action",
-          "risk": "Medium"
-        },
-        {
-          "id": "4",
-          "label": "Take the risky shortcut",
-          "intent": "Action",
-          "risk": "High"
-        }
-      ],
-      "freeform_hint": "Or describe another action.",
+      "choices": [],
+      "freeform_hint": "",
       "prompt": "What do you do?"
     },
-    "rendered": "### Scene Turn Example\nRolls:\nLow visibility. Difficult terrain near the gap.\nScene:\nFog coils around the ruined bridge.\nOutcome:\nYou hold position and assess the crossing.\nChoices:\n1. Press forward carefully (Intent: Action; Risk: Low)\n2. Ask a clarifying question (Intent: Action; Risk: Low)\n3. Set up an advantage (Intent: Action; Risk: Medium)\n4. Take the risky shortcut (Intent: Action; Risk: High)\nOr describe another action.\nWhat do you do?"
+    "rendered": "### Scene Turn Example\nRolls:\nLow visibility. Difficult terrain near the gap.\nScene:\nFog coils around the ruined bridge.\nOutcome:\nYou hold position and assess the crossing.\nWhat do you do?"
   },
   "dialogue_turn": {
     "envelope": {
@@ -74,40 +49,11 @@
           "content": "She asks what proof you have."
         }
       ],
-      "choices": [
-        {
-          "id": "1",
-          "label": "Firm demand",
-          "intent": "Action",
-          "risk": "Medium",
-          "tone": "firm"
-        },
-        {
-          "id": "2",
-          "label": "Curious probe",
-          "intent": "Action",
-          "risk": "Low",
-          "tone": "curious"
-        },
-        {
-          "id": "3",
-          "label": "Deceptive bluff",
-          "intent": "Action",
-          "risk": "High",
-          "tone": "deceptive"
-        },
-        {
-          "id": "4",
-          "label": "Empathetic appeal",
-          "intent": "Action",
-          "risk": "Low",
-          "tone": "empathetic"
-        }
-      ],
-      "freeform_hint": "Or describe another action.",
+      "choices": [],
+      "freeform_hint": "",
       "prompt": "What do you do?"
     },
-    "rendered": "### Dialogue Turn Example\nRolls:\nSocial stakes: trust can rise or fall.\nScene:\nMayor Elira waits, guarded but attentive.\nOutcome:\nShe asks what proof you have.\nChoices:\n1. Firm demand (Intent: Action; Risk: Medium; Tone: firm)\n2. Curious probe (Intent: Action; Risk: Low; Tone: curious)\n3. Deceptive bluff (Intent: Action; Risk: High; Tone: deceptive)\n4. Empathetic appeal (Intent: Action; Risk: Low; Tone: empathetic)\nOr describe another action.\nWhat do you do?"
+    "rendered": "### Dialogue Turn Example\nRolls:\nSocial stakes: trust can rise or fall.\nScene:\nMayor Elira waits, guarded but attentive.\nOutcome:\nShe asks what proof you have.\nWhat do you do?"
   },
   "combat_turn": {
     "envelope": {
@@ -131,36 +77,11 @@
           "content": "The raider circles left while you hold center."
         }
       ],
-      "choices": [
-        {
-          "id": "1",
-          "label": "Strike the nearest threat",
-          "intent": "Action",
-          "risk": "Medium"
-        },
-        {
-          "id": "2",
-          "label": "Disengage to cover",
-          "intent": "Action+Move",
-          "risk": "Low"
-        },
-        {
-          "id": "3",
-          "label": "Use a resource now",
-          "intent": "Bonus",
-          "risk": "Low"
-        },
-        {
-          "id": "4",
-          "label": "Support an ally setup",
-          "intent": "Action",
-          "risk": "Medium"
-        }
-      ],
-      "freeform_hint": "Or describe another action.",
+      "choices": [],
+      "freeform_hint": "",
       "prompt": "What do you do?"
     },
-    "rendered": "### Combat Turn Example\nRolls:\nAttack roll pending for your declared strike.\nScene:\nRound 2 in the Old Keep courtyard.\nOutcome:\nThe raider circles left while you hold center.\nChoices:\n1. Strike the nearest threat (Intent: Action; Risk: Medium)\n2. Disengage to cover (Intent: Action+Move; Risk: Low)\n3. Use a resource now (Intent: Bonus; Risk: Low)\n4. Support an ally setup (Intent: Action; Risk: Medium)\nOr describe another action.\nWhat do you do?"
+    "rendered": "### Combat Turn Example\nRolls:\nAttack roll pending for your declared strike.\nScene:\nRound 2 in the Old Keep courtyard.\nOutcome:\nThe raider circles left while you hold center.\nWhat do you do?"
   },
   "exploration_turn": {
     "envelope": {
@@ -184,36 +105,11 @@
           "content": "You pause at the junction to choose direction."
         }
       ],
-      "choices": [
-        {
-          "id": "1",
-          "label": "Investigate the area",
-          "intent": "Action",
-          "risk": "Medium"
-        },
-        {
-          "id": "2",
-          "label": "Interact with a feature",
-          "intent": "Action",
-          "risk": "Low"
-        },
-        {
-          "id": "3",
-          "label": "Navigate onward",
-          "intent": "Action",
-          "risk": "Medium"
-        },
-        {
-          "id": "4",
-          "label": "Take a short rest",
-          "intent": "Action",
-          "risk": "Low"
-        }
-      ],
-      "freeform_hint": "Or describe another action.",
+      "choices": [],
+      "freeform_hint": "",
       "prompt": "What do you do?"
     },
-    "rendered": "### Exploration Turn Example\nRolls:\nTorchlight is low. Noise risks patrol attention.\nScene:\nThe crypt corridor forks beside a collapsed wall.\nOutcome:\nYou pause at the junction to choose direction.\nChoices:\n1. Investigate the area (Intent: Action; Risk: Medium)\n2. Interact with a feature (Intent: Action; Risk: Low)\n3. Navigate onward (Intent: Action; Risk: Medium)\n4. Take a short rest (Intent: Action; Risk: Low)\nOr describe another action.\nWhat do you do?"
+    "rendered": "### Exploration Turn Example\nRolls:\nTorchlight is low. Noise risks patrol attention.\nScene:\nThe crypt corridor forks beside a collapsed wall.\nOutcome:\nYou pause at the junction to choose direction.\nWhat do you do?"
   },
   "skill_check_turn": {
     "envelope": {
@@ -237,36 +133,11 @@
           "content": "The gate opens with a loud click."
         }
       ],
-      "choices": [
-        {
-          "id": "1",
-          "label": "Attempt a direct approach",
-          "intent": "Action",
-          "risk": "Medium"
-        },
-        {
-          "id": "2",
-          "label": "Use tools or gear",
-          "intent": "Action",
-          "risk": "Low"
-        },
-        {
-          "id": "3",
-          "label": "Assist an ally",
-          "intent": "Action",
-          "risk": "Low"
-        },
-        {
-          "id": "4",
-          "label": "Force a high-risk attempt",
-          "intent": "Action",
-          "risk": "High"
-        }
-      ],
-      "freeform_hint": "Or describe another action.",
+      "choices": [],
+      "freeform_hint": "",
       "prompt": "What do you do?"
     },
-    "rendered": "### Skill Check Turn Example\nRolls:\nRoll 14 + 5 = 19.\nScene:\nA locked iron gate blocks the vault stairs.\nOutcome:\nThe gate opens with a loud click.\nChoices:\n1. Attempt a direct approach (Intent: Action; Risk: Medium)\n2. Use tools or gear (Intent: Action; Risk: Low)\n3. Assist an ally (Intent: Action; Risk: Low)\n4. Force a high-risk attempt (Intent: Action; Risk: High)\nOr describe another action.\nWhat do you do?"
+    "rendered": "### Skill Check Turn Example\nRolls:\nRoll 14 + 5 = 19.\nScene:\nA locked iron gate blocks the vault stairs.\nOutcome:\nThe gate opens with a loud click.\nWhat do you do?"
   },
   "ooc_panel": {
     "envelope": {
@@ -323,35 +194,10 @@
           "content": "Start a turn, then retry safely."
         }
       ],
-      "choices": [
-        {
-          "id": "1",
-          "label": "Retry the command safely",
-          "intent": "Action",
-          "risk": "Low"
-        },
-        {
-          "id": "2",
-          "label": "Inspect state before retry",
-          "intent": "Action",
-          "risk": "Low"
-        },
-        {
-          "id": "3",
-          "label": "Rollback the open turn",
-          "intent": "Action",
-          "risk": "Medium"
-        },
-        {
-          "id": "4",
-          "label": "Abort and return to OOC",
-          "intent": "Action",
-          "risk": "Low"
-        }
-      ],
-      "freeform_hint": "Or describe another action.",
+      "choices": [],
+      "freeform_hint": "",
       "prompt": "What do you do?"
     },
-    "rendered": "### System Error Example\nError:\nCommand: combat act\nFailure: no_open_turn\nRollback:\nRollback not required for this error.\nRecovery:\nStart a turn, then retry safely.\nChoices:\n1. Retry the command safely (Intent: Action; Risk: Low)\n2. Inspect state before retry (Intent: Action; Risk: Low)\n3. Rollback the open turn (Intent: Action; Risk: Medium)\n4. Abort and return to OOC (Intent: Action; Risk: Low)\nOr describe another action.\nWhat do you do?"
+    "rendered": "### System Error Example\nError:\nCommand: combat act\nFailure: no_open_turn\nRollback:\nRollback not required for this error.\nRecovery:\nStart a turn, then retry safely.\nWhat do you do?"
   }
 }

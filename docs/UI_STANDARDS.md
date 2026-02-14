@@ -6,7 +6,7 @@ This document defines the strict player-facing UI contract used by runtime respo
 
 - Use one chat-first envelope for all player-facing output.
 - Keep tactical-cinematic tone: one short flavor line, then decision-critical details.
-- Use four default choices plus a freeform fallback on actionable templates.
+- Keep actionable turns freeform so players can declare their own actions.
 - Enforce section order, section labels, and prompt consistency.
 
 ## Canonical Envelope
@@ -33,13 +33,8 @@ Version is fixed at `1.0`.
     {"id":"scene","label":"Scene","content":"..."},
     {"id":"outcome","label":"Outcome","content":"..."}
   ],
-  "choices": [
-    {"id":"1","label":"Strike the raider","intent":"Action","risk":"Medium"},
-    {"id":"2","label":"Disengage to cover","intent":"Action+Move","risk":"Low"},
-    {"id":"3","label":"Drink potion","intent":"Bonus","risk":"Low"},
-    {"id":"4","label":"Help ally flank","intent":"Action","risk":"Medium"}
-  ],
-  "freeform_hint":"Or describe another action.",
+  "choices": [],
+  "freeform_hint":"",
   "prompt":"What do you do?"
 }
 ```
@@ -50,7 +45,6 @@ Version is fixed at `1.0`.
   - Sections: `rolls`, `scene`, `outcome`
 - `dialogue_turn`
   - Sections: `rolls`, `scene`, `outcome`
-  - Choice tone tags required: `firm`, `curious`, `deceptive`, `empathetic`
 - `combat_turn`
   - Sections: `rolls`, `scene`, `outcome`
 - `exploration_turn`
@@ -63,19 +57,18 @@ Version is fixed at `1.0`.
 - `system_error`
   - Sections: `error`, `rollback`, `recovery`
 
-## Choice Grammar
+## Input Grammar
 
 Input resolution rules:
 
-1. Numbered choice (`1`, `2`, `3`, `4`)
-2. Exact label match
-3. Freeform fallback
+1. Freeform action text from the player.
+2. Runtime interpretation of that action against current scene state.
 
 Rendering rules:
 
-- Choices are always rendered as numbered lines (`1.` to `4.`).
 - Actionable templates always include:
-  - `freeform_hint`: `Or describe another action.`
+  - `choices`: empty list
+  - `freeform_hint`: empty string
   - `prompt`: `What do you do?`
 - Player-facing markdown should not print envelope metadata lines (`ui_contract_version`, `template_id`).
 
@@ -86,8 +79,8 @@ The validator rejects envelopes when:
 - Required keys are missing or out of canonical order.
 - `template_id` is unknown.
 - Required sections are missing, mislabeled, or out of order.
-- Actionable templates do not have exactly 4 choices.
-- Choice IDs are not sequential (`1` to `4`).
+- Actionable templates include any preset choices.
+- Actionable templates include a non-empty `freeform_hint`.
 - Actionable prompt is not exactly `What do you do?`.
 
 ## Runtime Integration
@@ -102,4 +95,4 @@ Current runtime integration points in `tools/dmctl`:
 Each integrated response includes:
 
 - `ui` (validated canonical envelope)
-- `ui_markdown` (numbered chat rendering)
+- `ui_markdown` (chat rendering)

@@ -7,9 +7,8 @@ from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
 UI_CONTRACT_VERSION = "1.0"
 DEFAULT_PROMPT = "What do you do?"
-DEFAULT_FREEFORM_HINT = "Or describe another action."
-DEFAULT_CHOICE_COUNT = 4
-VALID_DIALOGUE_TONES = ("firm", "curious", "deceptive", "empathetic")
+DEFAULT_FREEFORM_HINT = ""
+DEFAULT_CHOICE_COUNT = 0
 
 CANONICAL_ENVELOPE_KEYS = (
     "ui_contract_version",
@@ -154,48 +153,7 @@ def resolve_template_id(state: Mapping[str, Any]) -> str:
 
 
 def default_choices(template_id: str) -> List[Dict[str, str]]:
-    if template_id == "scene_turn":
-        return [
-            {"id": "1", "label": "Press forward carefully", "intent": "Action", "risk": "Low"},
-            {"id": "2", "label": "Ask a clarifying question", "intent": "Action", "risk": "Low"},
-            {"id": "3", "label": "Set up an advantage", "intent": "Action", "risk": "Medium"},
-            {"id": "4", "label": "Take the risky shortcut", "intent": "Action", "risk": "High"},
-        ]
-    if template_id == "dialogue_turn":
-        return [
-            {"id": "1", "label": "Firm demand", "intent": "Action", "risk": "Medium", "tone": "firm"},
-            {"id": "2", "label": "Curious probe", "intent": "Action", "risk": "Low", "tone": "curious"},
-            {"id": "3", "label": "Deceptive bluff", "intent": "Action", "risk": "High", "tone": "deceptive"},
-            {"id": "4", "label": "Empathetic appeal", "intent": "Action", "risk": "Low", "tone": "empathetic"},
-        ]
-    if template_id == "combat_turn":
-        return [
-            {"id": "1", "label": "Strike the nearest threat", "intent": "Action", "risk": "Medium"},
-            {"id": "2", "label": "Disengage to cover", "intent": "Action+Move", "risk": "Low"},
-            {"id": "3", "label": "Use a resource now", "intent": "Bonus", "risk": "Low"},
-            {"id": "4", "label": "Support an ally setup", "intent": "Action", "risk": "Medium"},
-        ]
-    if template_id == "exploration_turn":
-        return [
-            {"id": "1", "label": "Investigate the area", "intent": "Action", "risk": "Medium"},
-            {"id": "2", "label": "Interact with a feature", "intent": "Action", "risk": "Low"},
-            {"id": "3", "label": "Navigate onward", "intent": "Action", "risk": "Medium"},
-            {"id": "4", "label": "Take a short rest", "intent": "Action", "risk": "Low"},
-        ]
-    if template_id == "skill_check_turn":
-        return [
-            {"id": "1", "label": "Attempt a direct approach", "intent": "Action", "risk": "Medium"},
-            {"id": "2", "label": "Use tools or gear", "intent": "Action", "risk": "Low"},
-            {"id": "3", "label": "Assist an ally", "intent": "Action", "risk": "Low"},
-            {"id": "4", "label": "Force a high-risk attempt", "intent": "Action", "risk": "High"},
-        ]
-    if template_id == "system_error":
-        return [
-            {"id": "1", "label": "Retry the command safely", "intent": "Action", "risk": "Low"},
-            {"id": "2", "label": "Inspect state before retry", "intent": "Action", "risk": "Low"},
-            {"id": "3", "label": "Rollback the open turn", "intent": "Action", "risk": "Medium"},
-            {"id": "4", "label": "Abort and return to OOC", "intent": "Action", "risk": "Low"},
-        ]
+    _ = template_id
     return []
 
 
@@ -228,7 +186,7 @@ def build_envelope(
         choices = default_choices(template_id)
 
     if freeform_hint is None:
-        freeform_hint = DEFAULT_FREEFORM_HINT if spec.actionable else ""
+        freeform_hint = DEFAULT_FREEFORM_HINT
     if prompt is None:
         prompt = DEFAULT_PROMPT if spec.actionable else ""
 
@@ -306,31 +264,9 @@ def validate_envelope(envelope: Mapping[str, Any]) -> List[str]:
 
     if spec.actionable:
         if len(choices) != spec.choice_count:
-            errors.append(f"choices must contain exactly {spec.choice_count} entries for {template_id}.")
-        expected_ids = [str(idx) for idx in range(1, spec.choice_count + 1)]
-        actual_ids: List[str] = []
-        for idx, choice in enumerate(choices):
-            if not isinstance(choice, Mapping):
-                errors.append(f"choices[{idx}] must be an object.")
-                continue
-            choice_id = str(choice.get("id", ""))
-            actual_ids.append(choice_id)
-            for key in ("label", "intent", "risk"):
-                value = choice.get(key)
-                if not isinstance(value, str) or not value.strip():
-                    errors.append(f"choices[{idx}].{key} must be a non-empty string.")
-            if template_id == "dialogue_turn":
-                tone = choice.get("tone")
-                if tone not in VALID_DIALOGUE_TONES:
-                    errors.append(
-                        f"choices[{idx}].tone must be one of {list(VALID_DIALOGUE_TONES)} for dialogue_turn."
-                    )
-        if actual_ids and actual_ids != expected_ids:
-            errors.append(f"choices ids must be sequential {expected_ids}.")
-
-        freeform_hint = envelope.get("freeform_hint")
-        if not isinstance(freeform_hint, str) or not freeform_hint.strip():
-            errors.append("freeform_hint must be a non-empty string for actionable templates.")
+            errors.append(f"choices must be empty for actionable template {template_id}.")
+        if envelope.get("freeform_hint") != "":
+            errors.append(f"freeform_hint must be empty for actionable template {template_id}.")
         prompt = envelope.get("prompt")
         if prompt != DEFAULT_PROMPT:
             errors.append(f"prompt must exactly match '{DEFAULT_PROMPT}' for actionable templates.")
@@ -364,9 +300,9 @@ def parse_choice_input(user_input: str, envelope_or_choices: Any) -> Dict[str, A
     if not text:
         raise UIContractError("invalid_choice_input", {"reason": "empty"})
 
-    if text in {"1", "2", "3", "4"}:
+    if text.isdigit():
         index = int(text) - 1
-        if index < len(choices):
+        if 0 <= index < len(choices):
             choice = choices[index]
             if isinstance(choice, Mapping):
                 return {"kind": "preset", "choice_id": str(choice.get("id", text)), "choice": dict(choice)}

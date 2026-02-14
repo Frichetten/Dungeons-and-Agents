@@ -133,9 +133,18 @@ class TestUIContractV1(unittest.TestCase):
         wrong_order["sections"][0], wrong_order["sections"][1] = wrong_order["sections"][1], wrong_order["sections"][0]
         self.assertTrue(any("sections[0].id must be" in msg for msg in validate_envelope(wrong_order)))
 
-        wrong_choice_count = copy.deepcopy(base)
-        wrong_choice_count["choices"] = wrong_choice_count["choices"][:-1]
-        self.assertTrue(any("choices must contain exactly 4" in msg for msg in validate_envelope(wrong_choice_count)))
+        unexpected_choices = copy.deepcopy(base)
+        unexpected_choices["choices"] = [{"id": "1", "label": "Fallback", "intent": "Action", "risk": "Low"}]
+        self.assertTrue(any("choices must be empty for actionable template" in msg for msg in validate_envelope(unexpected_choices)))
+
+        nonempty_freeform_hint = copy.deepcopy(base)
+        nonempty_freeform_hint["freeform_hint"] = "Or describe another action."
+        self.assertTrue(
+            any(
+                "freeform_hint must be empty for actionable template" in msg
+                for msg in validate_envelope(nonempty_freeform_hint)
+            )
+        )
 
         missing_prompt = copy.deepcopy(base)
         missing_prompt["prompt"] = "Choose."
@@ -146,12 +155,24 @@ class TestUIContractV1(unittest.TestCase):
         envelope = fixture["scene_turn"]["envelope"]
 
         numeric = parse_choice_input("1", envelope)
-        self.assertEqual(numeric["kind"], "preset")
-        self.assertEqual(numeric["choice_id"], "1")
+        self.assertEqual(numeric["kind"], "freeform")
+        self.assertEqual(numeric["text"], "1")
 
         label = parse_choice_input("Set up an advantage", envelope)
-        self.assertEqual(label["kind"], "preset")
-        self.assertEqual(label["choice_id"], "3")
+        self.assertEqual(label["kind"], "freeform")
+        self.assertEqual(label["text"], "Set up an advantage")
+
+        custom_choices = [
+            {"id": "1", "label": "Advance", "intent": "Action", "risk": "Low"},
+            {"id": "2", "label": "Hold", "intent": "Action", "risk": "Low"},
+        ]
+        numeric_preset = parse_choice_input("2", custom_choices)
+        self.assertEqual(numeric_preset["kind"], "preset")
+        self.assertEqual(numeric_preset["choice_id"], "2")
+
+        label_preset = parse_choice_input("Advance", custom_choices)
+        self.assertEqual(label_preset["kind"], "preset")
+        self.assertEqual(label_preset["choice_id"], "1")
 
         freeform = parse_choice_input("Jump to the broken parapet", envelope)
         self.assertEqual(freeform["kind"], "freeform")
