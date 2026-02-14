@@ -223,6 +223,21 @@ Use this structure:
 - Open Threads
 - Prompt
 
+Additionally, every player-facing payload must comply with UI Contract v1:
+
+- `ui_contract_version` must be `1.0`.
+- `template_id` must be one of:
+  - `scene_turn`
+  - `dialogue_turn`
+  - `combat_turn`
+  - `exploration_turn`
+  - `skill_check_turn`
+  - `ooc_panel`
+  - `system_error`
+- Section order must follow the template registry.
+- Actionable templates must include exactly 4 numbered choices plus freeform fallback.
+- Actionable templates must end with exact prompt: `What do you do?`
+
 State Diff must include:
 - Time advanced
 - Location change
