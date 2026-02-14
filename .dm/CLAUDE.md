@@ -1,5 +1,7 @@
-@PLAY_MODE.md
-
 # .dm/CLAUDE.md
 
-When Claude is operating in this subtree, `PLAY_MODE.md` is the active gameplay instruction set.
+This subtree contains gameplay state and runtime documentation.
+
+- Do not auto-load `PLAY_MODE.md` based only on path.
+- Use root `CLAUDE.md` + `AGENTS.md` mode routing.
+- Load `.dm/PLAY_MODE.md` only after explicit play intent (`/play`, start campaign, resume campaign).
