@@ -47,3 +47,10 @@ All commands return JSON only.
 ```bash
 python3 -m unittest discover -s tests -v
 ```
+
+## Agent Instruction Layout
+
+- Engineering/default agent instructions: `AGENTS.md`
+- Claude routing and compatibility notes: `CLAUDE.md`
+- Gameplay runtime contract: `.dm/PLAY_MODE.md`
+- Player-facing command reference: `docs/PLAYER_GUIDE.md`
