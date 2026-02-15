@@ -119,6 +119,17 @@ def append_event_file(path: Path, payload: Dict[str, Any]) -> None:
         handle.write(json.dumps(payload, separators=(",", ":")) + "\n")
 
 
+def atomic_write_ndjson(path: Path, records: Sequence[Dict[str, Any]]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.NamedTemporaryFile("w", dir=path.parent, delete=False, encoding="utf-8") as tmp:
+        for record in records:
+            tmp.write(json.dumps(record, separators=(",", ":")) + "\n")
+        tmp.flush()
+        os.fsync(tmp.fileno())
+        tmp_name = tmp.name
+    os.replace(tmp_name, path)
+
+
 def append_transcript(path: Path, text: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("a", encoding="utf-8") as handle:
@@ -157,6 +168,168 @@ def restore_database_from_file(source_path: Path, destination_path: Path) -> Non
     finally:
         dest_conn.close()
         source_conn.close()
+
+
+def committed_event_log_records(conn: sqlite3.Connection, campaign_id: str) -> List[Dict[str, Any]]:
+    rows = to_jsonable(
+        conn.execute(
+            """
+            SELECT rowid AS row_order, id, campaign_id, turn_id, command, payload_json, created_at
+            FROM events
+            WHERE campaign_id = ? AND stage = 'committed'
+            ORDER BY row_order
+            """,
+            (campaign_id,),
+        )
+    )
+    records: List[Dict[str, Any]] = []
+    for row in rows:
+        payload = {}
+        try:
+            parsed = json.loads(row.get("payload_json") or "{}")
+            if isinstance(parsed, dict):
+                payload = parsed
+        except Exception:
+            payload = {}
+        records.append(
+            {
+                "id": row["id"],
+                "campaign_id": row["campaign_id"],
+                "turn_id": row["turn_id"],
+                "command": row["command"],
+                "payload": payload,
+                "timestamp": row["created_at"],
+            }
+        )
+    return records
+
+
+def parse_event_log_file(path: Path) -> Tuple[List[Dict[str, Any]], Optional[str]]:
+    records: List[Dict[str, Any]] = []
+    parse_error: Optional[str] = None
+    if not path.exists():
+        return (records, parse_error)
+
+    for line_no, line in enumerate(path.read_text(encoding="utf-8").splitlines(), start=1):
+        if not line.strip():
+            continue
+        try:
+            entry = json.loads(line)
+        except Exception as exc:
+            if parse_error is None:
+                parse_error = f"line {line_no}: {exc}"
+            continue
+        if not isinstance(entry, dict):
+            if parse_error is None:
+                parse_error = f"event log line {line_no} must be a JSON object"
+            continue
+        if "id" not in entry:
+            if parse_error is None:
+                parse_error = f"event log line missing id at line {line_no}"
+            continue
+        if not isinstance(entry.get("id"), str) or not str(entry["id"]).strip():
+            if parse_error is None:
+                parse_error = f"event log line id must be non-empty string at line {line_no}"
+            continue
+        records.append(entry)
+    return (records, parse_error)
+
+
+def first_mismatch_index(left: Sequence[str], right: Sequence[str]) -> Optional[int]:
+    for idx, (lhs, rhs) in enumerate(zip(left, right), start=1):
+        if lhs != rhs:
+            return idx
+    if len(left) != len(right):
+        return min(len(left), len(right)) + 1
+    return None
+
+
+def sample_missing_ids(
+    primary: Sequence[str], comparison_set: set[str], limit: int = 20
+) -> List[str]:
+    sample: List[str] = []
+    seen: set[str] = set()
+    for value in primary:
+        if value in comparison_set or value in seen:
+            continue
+        sample.append(value)
+        seen.add(value)
+        if len(sample) >= max(1, limit):
+            break
+    return sample
+
+
+def collect_event_log_parity(conn: sqlite3.Connection, campaign_id: str) -> Dict[str, Any]:
+    event_path = campaign_event_log_path(campaign_id)
+    db_events = committed_event_log_records(conn, campaign_id)
+    db_ids = [str(row["id"]) for row in db_events]
+
+    file_events, parse_error = parse_event_log_file(event_path)
+    file_ids = [str(row.get("id", "")) for row in file_events]
+
+    db_set = set(db_ids)
+    file_set = set(file_ids)
+    mismatch = bool(parse_error) or db_ids != file_ids
+    details: Dict[str, Any] = {
+        "db_count": len(db_ids),
+        "file_count": len(file_ids),
+        "first_mismatch_index": first_mismatch_index(db_ids, file_ids),
+        "only_in_db_sample": sample_missing_ids(db_ids, file_set),
+        "only_in_file_sample": sample_missing_ids(file_ids, db_set),
+    }
+    if parse_error:
+        details["parse_error"] = parse_error
+
+    return {
+        "file_missing": not event_path.exists(),
+        "mismatch": mismatch,
+        "details": details,
+        "db_events": db_events,
+    }
+
+
+def backup_event_log(path: Path) -> str:
+    if not path.exists():
+        return ""
+    ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    backup_path = path.parent / f"{path.name}.{ts}.bak"
+    shutil.copy2(path, backup_path)
+    return str(backup_path)
+
+
+def repair_event_log_parity(
+    campaign_id: str,
+    *,
+    dry_run: bool = False,
+    backup_existing: bool = True,
+    force: bool = False,
+) -> Dict[str, Any]:
+    conn = connect_campaign_db(campaign_id)
+    try:
+        before = collect_event_log_parity(conn, campaign_id)
+        needs_repair = bool(force or before["file_missing"] or before["mismatch"])
+        backup_path = ""
+        repaired = False
+
+        if not dry_run and needs_repair:
+            event_path = campaign_event_log_path(campaign_id)
+            if backup_existing:
+                backup_path = backup_event_log(event_path)
+            atomic_write_ndjson(event_path, before["db_events"])
+            repaired = True
+
+        after = collect_event_log_parity(conn, campaign_id)
+    finally:
+        conn.close()
+
+    return {
+        "campaign": campaign_id,
+        "before": before["details"],
+        "after": after["details"],
+        "mismatch": bool(before["file_missing"] or before["mismatch"]),
+        "backup": backup_path,
+        "repaired": repaired,
+    }
 
 
 def as_dict(row: Optional[sqlite3.Row]) -> Dict[str, Any]:
@@ -1940,6 +2113,7 @@ def parse_turn_id(turn: Optional[sqlite3.Row]) -> Optional[int]:
 def validate_campaign_state(campaign_id: str) -> Dict[str, Any]:
     errors: List[str] = []
     warnings: List[str] = []
+    event_log_parity: Optional[Dict[str, Any]] = None
 
     cdir = campaign_dir(campaign_id)
     db_path = campaign_db_path(campaign_id)
@@ -2035,34 +2209,12 @@ def validate_campaign_state(campaign_id: str) -> Dict[str, Any]:
                 errors.append(f"invalid snapshot JSON: {exc}")
 
         if event_path.exists():
-            file_events: List[Dict[str, Any]] = []
-            try:
-                for line_no, line in enumerate(event_path.read_text(encoding="utf-8").splitlines(), start=1):
-                    if not line.strip():
-                        continue
-                    entry = json.loads(line)
-                    if "id" not in entry:
-                        errors.append(f"event log line missing id at line {line_no}")
-                        continue
-                    file_events.append(entry)
-            except Exception as exc:
-                errors.append(f"invalid event log NDJSON: {exc}")
-                file_events = []
-
-            db_events = to_jsonable(
-                conn.execute(
-                    """
-                    SELECT rowid AS row_order, id, campaign_id, turn_id, command, payload_json, created_at
-                    FROM events
-                    WHERE campaign_id = ? AND stage = 'committed'
-                    ORDER BY row_order
-                    """,
-                    (campaign_id,),
-                )
-            )
-            db_event_ids = [row["id"] for row in db_events]
-            file_event_ids = [str(row["id"]) for row in file_events]
-            if db_event_ids != file_event_ids:
+            parity = collect_event_log_parity(conn, campaign_id)
+            event_log_parity = parity["details"]
+            parse_error = parity["details"].get("parse_error")
+            if parse_error:
+                errors.append(f"invalid event log NDJSON: {parse_error}")
+            if parity["mismatch"]:
                 errors.append(
                     "event log mismatch: committed event IDs differ between database and events.ndjson"
                 )
@@ -2070,7 +2222,10 @@ def validate_campaign_state(campaign_id: str) -> Dict[str, Any]:
     finally:
         conn.close()
 
-    return {"campaign": campaign_id, "errors": errors, "warnings": warnings}
+    payload: Dict[str, Any] = {"campaign": campaign_id, "errors": errors, "warnings": warnings}
+    if event_log_parity is not None:
+        payload["event_log_parity"] = event_log_parity
+    return payload
 
 
 def get_active_encounter(conn: sqlite3.Connection, campaign_id: str) -> Optional[sqlite3.Row]:
@@ -2363,6 +2518,12 @@ def command_campaign_restore(args: argparse.Namespace, _payload: Dict[str, Any])
     conn.commit()
     snapshot = write_snapshot(conn, target_campaign_id)
     conn.close()
+    repair_event_log_parity(
+        target_campaign_id,
+        dry_run=False,
+        backup_existing=False,
+        force=True,
+    )
 
     return (
         {
@@ -2372,6 +2533,18 @@ def command_campaign_restore(args: argparse.Namespace, _payload: Dict[str, Any])
         },
         [],
     )
+
+
+def command_campaign_repair_events(args: argparse.Namespace, payload: Dict[str, Any]) -> Tuple[Dict[str, Any], List[str]]:
+    campaign_id = require_campaign(args.campaign)
+    dry_run = bool(args.dry_run or payload.get("dry_run", False))
+    no_backup = bool(args.no_backup or payload.get("no_backup", False))
+    result = repair_event_log_parity(
+        campaign_id,
+        dry_run=dry_run,
+        backup_existing=not no_backup,
+    )
+    return (result, [])
 
 
 def command_campaign_seed(args: argparse.Namespace, payload: Dict[str, Any]) -> Tuple[Dict[str, Any], List[str]]:
@@ -2906,6 +3079,12 @@ def command_turn_rollback(args: argparse.Namespace, payload: Dict[str, Any]) -> 
     snapshot = write_snapshot(conn2, campaign_id)
     conn2.commit()
     conn2.close()
+    repair_event_log_parity(
+        campaign_id,
+        dry_run=False,
+        backup_existing=False,
+        force=True,
+    )
 
     if checkpoint_path.exists():
         checkpoint_path.unlink()
@@ -6327,6 +6506,12 @@ def command_ooc(args: argparse.Namespace, payload: Dict[str, Any]) -> Tuple[Dict
         snapshot = write_snapshot(conn2, campaign_id)
         conn2.commit()
         conn2.close()
+        repair_event_log_parity(
+            campaign_id,
+            dry_run=False,
+            backup_existing=False,
+            force=True,
+        )
         return ooc_response(
             {
                 "campaign": campaign_id,
@@ -7612,6 +7797,7 @@ def command_map() -> Dict[Tuple[str, str], Any]:
         ("campaign", "list"): command_campaign_list,
         ("campaign", "backup"): command_campaign_backup,
         ("campaign", "restore"): command_campaign_restore,
+        ("campaign", "repair-events"): command_campaign_repair_events,
         ("campaign", "seed"): command_campaign_seed,
         ("turn", "begin"): command_turn_begin,
         ("turn", "commit"): command_turn_commit,
@@ -7688,6 +7874,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--full", action="store_true")
     parser.add_argument("--advantage", action="store_true")
     parser.add_argument("--disadvantage", action="store_true")
+    parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument("--no-backup", action="store_true")
     parser.add_argument("--keep-highest", type=int)
     parser.add_argument("--keep-lowest", type=int)
     parser.add_argument("--drop-highest", type=int, default=0)
@@ -7716,6 +7904,8 @@ def build_help_payload(group: Optional[str], action: Optional[str]) -> Dict[str,
             "--full",
             "--advantage",
             "--disadvantage",
+            "--dry-run",
+            "--no-backup",
             "--keep-highest",
             "--keep-lowest",
             "--drop-highest",
@@ -7724,6 +7914,7 @@ def build_help_payload(group: Optional[str], action: Optional[str]) -> Dict[str,
         "groups": [{"group": key, "actions": value} for key, value in grouped.items()],
         "examples": [
             "dmctl campaign create --campaign demo --name \"Demo\"",
+            "dmctl campaign repair-events --campaign demo --dry-run",
             "dmctl turn begin --campaign demo",
             "dmctl state get --campaign demo --path world_state,players",
             "dmctl validate --campaign demo",
@@ -7764,6 +7955,8 @@ def infer_help_scope(raw_args: Sequence[str]) -> Tuple[Optional[str], Optional[s
         "--full",
         "--advantage",
         "--disadvantage",
+        "--dry-run",
+        "--no-backup",
         "-h",
         "--help",
     }

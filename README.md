@@ -21,6 +21,7 @@ Persistent local D&D 5e campaign engine with SQLite, migration-driven schema upg
 ## New Command Surface
 
 - `dmctl campaign seed`
+- `dmctl campaign repair-events`
 - `dmctl turn diff`
 - `dmctl world pulse`
 - `dmctl rest resolve`
