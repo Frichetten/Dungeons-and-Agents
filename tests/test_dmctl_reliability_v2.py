@@ -443,6 +443,24 @@ class TestDMCTLReliabilityV2(unittest.TestCase):
         self.assertTrue(validate["ok"])
         self.assertEqual(self._db_event_ids(), self._file_event_ids())
 
+    def test_10_campaign_repair_events_handles_non_object_ndjson_line(self):
+        with self._events_path().open("a", encoding="utf-8") as handle:
+            handle.write("123\n")
+
+        dry_run = run_dmctl("campaign", "repair-events", "--campaign", self.campaign_id, "--dry-run")
+        self.assertTrue(dry_run["data"]["mismatch"])
+        self.assertFalse(dry_run["data"]["repaired"])
+        self.assertIn("parse_error", dry_run["data"]["before"])
+        self.assertIn("must be a JSON object", dry_run["data"]["before"]["parse_error"])
+
+        repair = run_dmctl("campaign", "repair-events", "--campaign", self.campaign_id)
+        self.assertTrue(repair["data"]["repaired"])
+        self.assertNotIn("parse_error", repair["data"]["after"])
+
+        validate = run_dmctl("validate", "--campaign", self.campaign_id)
+        self.assertTrue(validate["ok"])
+        self.assertEqual(self._db_event_ids(), self._file_event_ids())
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

@@ -98,6 +98,7 @@ class TestDMCTLValidationV2(unittest.TestCase):
                 )
                 + "\n"
             )
+            handle.write("123\n")
 
         validate = run_dmctl("validate", "--campaign", self.campaign_id, expect_ok=False)
         self.assertEqual(validate["error"], "validation_failed")
@@ -113,6 +114,7 @@ class TestDMCTLValidationV2(unittest.TestCase):
         ]:
             self.assertIn(key, parity)
         self.assertGreater(parity["file_count"], parity["db_count"])
+        self.assertIn("parse_error", parity)
 
 
 if __name__ == "__main__":

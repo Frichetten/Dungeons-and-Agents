@@ -207,9 +207,17 @@ def parse_event_log_file(path: Path) -> Tuple[List[Dict[str, Any]], Optional[str
             if parse_error is None:
                 parse_error = f"line {line_no}: {exc}"
             continue
+        if not isinstance(entry, dict):
+            if parse_error is None:
+                parse_error = f"event log line {line_no} must be a JSON object"
+            continue
         if "id" not in entry:
             if parse_error is None:
                 parse_error = f"event log line missing id at line {line_no}"
+            continue
+        if not isinstance(entry.get("id"), str) or not str(entry["id"]).strip():
+            if parse_error is None:
+                parse_error = f"event log line id must be non-empty string at line {line_no}"
             continue
         records.append(entry)
     return (records, parse_error)
@@ -245,7 +253,7 @@ def collect_event_log_parity(conn: sqlite3.Connection, campaign_id: str) -> Dict
     db_ids = [str(row["id"]) for row in db_events]
 
     file_events, parse_error = parse_event_log_file(event_path)
-    file_ids = [str(row["id"]) for row in file_events]
+    file_ids = [str(row.get("id", "")) for row in file_events]
 
     db_set = set(db_ids)
     file_set = set(file_ids)
