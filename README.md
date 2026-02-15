@@ -30,15 +30,16 @@ Persistent local D&D 5e campaign engine with SQLite, migration-driven schema upg
 - `dmctl spell cast`
 - `dmctl spell end`
 - `dmctl combat resolve`
-- `dmctl ooc <recap|sheet|inventory|quests|rumors|npcs|relationships|factions|time|map|state|savepoint|undo_last_turn|dashboard>`
+- `dmctl ooc <recap|refresh|sheet|inventory|quests|rumors|npcs|relationships|factions|time|map|state|savepoint|undo_last_turn|dashboard>`
 
 All commands return JSON only.
 
 ## Compact Responses
 
-- High-volume commands now default to compact payloads (`turn commit`, `turn rollback`, `ooc dashboard`, `recap generate`, and `state get` without `--path`).
+- High-volume commands now default to compact payloads (`turn commit`, `turn rollback`, `ooc dashboard`, `ooc refresh` in `auto/compact` mode, `recap generate`, and `state get` without `--path`).
 - Use `--full` to request the legacy verbose payload for debugging or tooling compatibility.
 - Use `state get --path <key>` (or comma-separated keys) to fetch only the state slices you need.
+- `/recap` is player-facing momentum recap; `/refresh` is DM continuity rehydration that rebuilds memory context from persisted state.
 
 ## Run
 
