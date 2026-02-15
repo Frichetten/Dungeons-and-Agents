@@ -536,6 +536,64 @@ class TestDMCTLFeaturesV2(unittest.TestCase):
         for npc in snapshot.get("npcs", []):
             self.assertNotIn("notes_hidden", npc)
 
+    def test_11_player_facing_recap_and_dashboard_hide_dm_hooks(self):
+        dm_hook = f"dm_secret_hook_{uuid.uuid4().hex[:6]}"
+        public_hook = f"public_hook_{uuid.uuid4().hex[:6]}"
+
+        run_dmctl("turn", "begin", "--campaign", self.campaign_id)
+        run_dmctl(
+            "world",
+            "pulse",
+            "--campaign",
+            self.campaign_id,
+            payload={
+                "hours": 0,
+                "add_hooks": [dm_hook],
+                "add_public_hooks": [public_hook],
+            },
+        )
+        run_dmctl("turn", "commit", "--campaign", self.campaign_id, "--summary", "Hook visibility gating")
+
+        dashboard = run_dmctl("ooc", "dashboard", "--campaign", self.campaign_id)
+        self.assertIn(public_hook, dashboard["data"]["next_payoff_hooks"])
+        self.assertNotIn(dm_hook, dashboard["data"]["next_payoff_hooks"])
+
+        recap = run_dmctl("recap", "generate", "--campaign", self.campaign_id)
+        self.assertIn(public_hook, recap["data"]["open_threads"])
+        self.assertNotIn(dm_hook, recap["data"]["open_threads"])
+
+        dashboard_dm = run_dmctl(
+            "ooc",
+            "dashboard",
+            "--campaign",
+            self.campaign_id,
+            payload={"include_hidden": True},
+        )
+        self.assertIn(dm_hook, dashboard_dm["data"]["next_payoff_hooks"])
+
+        recap_dm = run_dmctl("recap", "generate", "--campaign", self.campaign_id, "--include-hidden")
+        self.assertIn(dm_hook, recap_dm["data"]["open_threads"])
+
+        refresh = run_dmctl("ooc", "refresh", "--campaign", self.campaign_id)
+        self.assertIn(dm_hook, refresh["data"]["memory_packet"]["next_payoff_hooks"])
+
+    def test_12_turn_begin_and_load_skip_event_log_parity_scan(self):
+        events_path = CAMPAIGNS_ROOT / self.campaign_id / "events.ndjson"
+        with events_path.open("a", encoding="utf-8") as handle:
+            handle.write("not-json\n")
+
+        load = run_dmctl("campaign", "load", "--campaign", self.campaign_id)
+        self.assertTrue(load["data"]["continuity_summary"]["ok"])
+
+        begin = run_dmctl("turn", "begin", "--campaign", self.campaign_id)
+        self.assertTrue(begin["data"]["continuity_summary"]["ok"])
+
+        validate = run_dmctl("validate", "--campaign", self.campaign_id, expect_ok=False)
+        self.assertEqual(validate["error"], "validation_failed")
+        result = validate["details"]["results"][0]
+        self.assertIn("event_log_parity", result)
+        self.assertIn("parse_error", result["event_log_parity"])
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
