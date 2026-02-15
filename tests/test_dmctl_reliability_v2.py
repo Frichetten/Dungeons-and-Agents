@@ -88,6 +88,26 @@ class TestDMCTLReliabilityV2(unittest.TestCase):
     def _events_path(self):
         return CAMPAIGNS_ROOT / self.campaign_id / "events.ndjson"
 
+    def _db_event_ids(self):
+        conn = sqlite3.connect(self._campaign_db())
+        conn.row_factory = sqlite3.Row
+        ids = [
+            row["id"]
+            for row in conn.execute(
+                "SELECT id FROM events WHERE campaign_id = ? AND stage = 'committed' ORDER BY rowid",
+                (self.campaign_id,),
+            )
+        ]
+        conn.close()
+        return ids
+
+    def _file_event_ids(self):
+        ids = []
+        for line in self._events_path().read_text(encoding="utf-8").splitlines():
+            if line.strip():
+                ids.append(json.loads(line)["id"])
+        return ids
+
     def test_00_migrations_and_schema_health(self):
         validate = run_dmctl("validate", "--campaign", self.campaign_id)
         self.assertTrue(validate["ok"])
@@ -165,26 +185,14 @@ class TestDMCTLReliabilityV2(unittest.TestCase):
 
         conn = sqlite3.connect(self._campaign_db())
         conn.row_factory = sqlite3.Row
-        db_events = [
-            r["id"]
-            for r in conn.execute(
-                "SELECT id FROM events WHERE campaign_id = ? AND stage = 'committed' ORDER BY rowid",
-                (self.campaign_id,),
-            )
-        ]
         staged_count = conn.execute(
             "SELECT COUNT(*) AS c FROM events WHERE campaign_id = ? AND stage = 'staged'",
             (self.campaign_id,),
         ).fetchone()["c"]
         conn.close()
 
-        file_events = []
-        for line in self._events_path().read_text(encoding="utf-8").splitlines():
-            if line.strip():
-                file_events.append(json.loads(line)["id"])
-
         self.assertEqual(staged_count, 0)
-        self.assertEqual(db_events, file_events)
+        self.assertEqual(self._db_event_ids(), self._file_event_ids())
 
         state = run_dmctl("state", "get", "--campaign", self.campaign_id, "--include-hidden", "--full")
         names = {row["item_name"] for row in state["data"]["inventory"]}
@@ -372,6 +380,68 @@ class TestDMCTLReliabilityV2(unittest.TestCase):
         self.assertEqual(conflict["details"]["quest_id"], "quest_beta")
         self.assertEqual(conflict["details"]["existing_quest_id"], "quest_alpha")
         run_dmctl("turn", "rollback", "--campaign", self.campaign_id, payload={"reason": "objective id conflict"})
+
+    def test_08_chained_committed_undo_maintains_event_log_parity(self):
+        for idx in range(2):
+            run_dmctl("turn", "begin", "--campaign", self.campaign_id)
+            run_dmctl(
+                "item",
+                "grant",
+                "--campaign",
+                self.campaign_id,
+                payload={
+                    "owner_type": "pc",
+                    "owner_id": "pc_hero",
+                    "item_name": f"undo_chain_marker_{idx}_{uuid.uuid4().hex[:6]}",
+                    "quantity": 1,
+                },
+            )
+            run_dmctl("turn", "commit", "--campaign", self.campaign_id, "--summary", f"undo chain commit {idx}")
+
+        first_undo = run_dmctl("ooc", "undo_last_turn", "--campaign", self.campaign_id)
+        self.assertEqual(first_undo["data"]["turn"]["status"], "rolled_back")
+        self.assertEqual(first_undo["data"]["turn"]["mode"], "committed")
+
+        second_undo = run_dmctl("ooc", "undo_last_turn", "--campaign", self.campaign_id)
+        self.assertEqual(second_undo["data"]["turn"]["status"], "rolled_back")
+        self.assertEqual(second_undo["data"]["turn"]["mode"], "committed")
+
+        validate = run_dmctl("validate", "--campaign", self.campaign_id)
+        self.assertTrue(validate["ok"])
+        self.assertEqual(self._db_event_ids(), self._file_event_ids())
+
+    def test_09_campaign_repair_events_dry_run_then_apply(self):
+        fake_id = f"evt_fake_{uuid.uuid4().hex[:10]}"
+        with self._events_path().open("a", encoding="utf-8") as handle:
+            handle.write(
+                json.dumps(
+                    {
+                        "id": fake_id,
+                        "campaign_id": self.campaign_id,
+                        "turn_id": 9999,
+                        "command": "fake",
+                        "payload": {},
+                        "timestamp": "2000-01-01T00:00:00+00:00",
+                    },
+                    separators=(",", ":"),
+                )
+                + "\n"
+            )
+
+        dry_run = run_dmctl("campaign", "repair-events", "--campaign", self.campaign_id, "--dry-run")
+        self.assertTrue(dry_run["data"]["mismatch"])
+        self.assertFalse(dry_run["data"]["repaired"])
+        self.assertEqual(dry_run["data"]["before"]["db_count"] + 1, dry_run["data"]["before"]["file_count"])
+
+        repair = run_dmctl("campaign", "repair-events", "--campaign", self.campaign_id)
+        self.assertTrue(repair["data"]["mismatch"])
+        self.assertTrue(repair["data"]["repaired"])
+        self.assertTrue(repair["data"]["backup"])
+        self.assertTrue(Path(repair["data"]["backup"]).exists())
+
+        validate = run_dmctl("validate", "--campaign", self.campaign_id)
+        self.assertTrue(validate["ok"])
+        self.assertEqual(self._db_event_ids(), self._file_event_ids())
 
 
 if __name__ == "__main__":

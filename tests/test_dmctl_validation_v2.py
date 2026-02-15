@@ -80,6 +80,40 @@ class TestDMCTLValidationV2(unittest.TestCase):
         self.assertEqual(bad_payload["error"], "invalid_world_state_payload")
         self.assertIn("message", bad_payload["details"])
 
+    def test_validate_reports_event_log_parity_details_on_mismatch(self):
+        run_dmctl("turn", "commit", "--campaign", self.campaign_id, "--summary", "validation parity baseline")
+        events_path = CAMPAIGNS_ROOT / self.campaign_id / "events.ndjson"
+        with events_path.open("a", encoding="utf-8") as handle:
+            handle.write(
+                json.dumps(
+                    {
+                        "id": f"evt_extra_{uuid.uuid4().hex[:8]}",
+                        "campaign_id": self.campaign_id,
+                        "turn_id": 9999,
+                        "command": "fake",
+                        "payload": {},
+                        "timestamp": "2000-01-01T00:00:00+00:00",
+                    },
+                    separators=(",", ":"),
+                )
+                + "\n"
+            )
+
+        validate = run_dmctl("validate", "--campaign", self.campaign_id, expect_ok=False)
+        self.assertEqual(validate["error"], "validation_failed")
+        result = validate["details"]["results"][0]
+        self.assertIn("event_log_parity", result)
+        parity = result["event_log_parity"]
+        for key in [
+            "db_count",
+            "file_count",
+            "first_mismatch_index",
+            "only_in_db_sample",
+            "only_in_file_sample",
+        ]:
+            self.assertIn(key, parity)
+        self.assertGreater(parity["file_count"], parity["db_count"])
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

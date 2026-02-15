@@ -392,6 +392,9 @@ class TestDMCTLFeaturesV2(unittest.TestCase):
         self.assertNotIn(marker, names_after)
         self.assertNotIn(f"{marker}-2", names_after)
 
+        load = run_dmctl("campaign", "load", "--campaign", self.campaign_id)
+        self.assertTrue(load["data"]["continuity_summary"]["ok"])
+
         validate = run_dmctl("validate", "--campaign", self.campaign_id)
         self.assertTrue(validate["ok"])
 
