@@ -594,6 +594,46 @@ class TestDMCTLFeaturesV2(unittest.TestCase):
         self.assertIn("event_log_parity", result)
         self.assertIn("parse_error", result["event_log_parity"])
 
+    def test_13_campaign_seed_applies_public_hooks_without_hooks_payload(self):
+        public_hook = f"seed_public_hook_{uuid.uuid4().hex[:6]}"
+
+        run_dmctl("turn", "begin", "--campaign", self.campaign_id)
+        run_dmctl(
+            "campaign",
+            "seed",
+            "--campaign",
+            self.campaign_id,
+            payload={"public_hooks": [public_hook]},
+        )
+        run_dmctl("turn", "commit", "--campaign", self.campaign_id, "--summary", "Seed public hooks only")
+
+        recap = run_dmctl("recap", "generate", "--campaign", self.campaign_id)
+        self.assertIn(public_hook, recap["data"]["open_threads"])
+
+    def test_14_reward_grant_shorthand_supports_public_hook_keys(self):
+        public_hook = f"reward_public_hook_{uuid.uuid4().hex[:6]}"
+
+        run_dmctl("turn", "begin", "--campaign", self.campaign_id)
+        reward = run_dmctl(
+            "reward",
+            "grant",
+            "--campaign",
+            self.campaign_id,
+            payload={
+                "recipient_type": "party",
+                "recipient_id": "party",
+                "hooks_add_public": [public_hook],
+            },
+        )
+        added = reward["data"]["reward_events"][0]["reward"]["hooks"]["added"]
+        self.assertIn(public_hook, added)
+
+        state = run_dmctl("state", "get", "--campaign", self.campaign_id, "--path", "world_state")
+        hooks = json.loads(state["data"]["value"]["unresolved_hooks_json"])
+        self.assertTrue(
+            any(row.get("text") == public_hook and row.get("visibility") == "public" for row in hooks)
+        )
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

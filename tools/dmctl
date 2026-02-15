@@ -2882,21 +2882,32 @@ def command_campaign_seed(args: argparse.Namespace, payload: Dict[str, Any]) -> 
             )
 
     hooks = payload.get("hooks")
-    if hooks is not None:
-        normalized_hooks = load_unresolved_hooks(hooks, default_visibility="dm", strict=True)
+    public_hooks = payload.get("public_hooks")
+    if hooks is not None or public_hooks is not None:
+        if hooks is not None:
+            normalized_hooks = load_unresolved_hooks(hooks, default_visibility="dm", strict=True)
+        else:
+            existing_world_row = conn.execute(
+                "SELECT unresolved_hooks_json FROM world_state WHERE campaign_id = ?",
+                (campaign_id,),
+            ).fetchone()
+            normalized_hooks = load_unresolved_hooks(
+                existing_world_row["unresolved_hooks_json"] if existing_world_row else "[]",
+                default_visibility="dm",
+                strict=True,
+            )
         hook_keys = {(row["visibility"], row["text"]) for row in normalized_hooks}
-        public_hooks = payload.get("public_hooks", [])
-        if public_hooks:
-            if not isinstance(public_hooks, list):
-                raise DMError("invalid_hook_collection", {"public_hooks": public_hooks})
-            for hook in public_hooks:
-                normalized = normalize_hook_entry(hook, default_visibility="public", strict=True)
-                if normalized:
-                    key = (normalized["visibility"], normalized["text"])
-                    if key in hook_keys:
-                        continue
-                    normalized_hooks.append(normalized)
-                    hook_keys.add(key)
+        public_hooks_list = public_hooks if public_hooks is not None else []
+        if not isinstance(public_hooks_list, list):
+            raise DMError("invalid_hook_collection", {"public_hooks": public_hooks_list})
+        for hook in public_hooks_list:
+            normalized = normalize_hook_entry(hook, default_visibility="public", strict=True)
+            if normalized:
+                key = (normalized["visibility"], normalized["text"])
+                if key in hook_keys:
+                    continue
+                normalized_hooks.append(normalized)
+                hook_keys.add(key)
         conn.execute(
             "UPDATE world_state SET unresolved_hooks_json = ?, updated_at = ? WHERE campaign_id = ?",
             (dump_unresolved_hooks(normalized_hooks), ts, campaign_id),
@@ -4411,6 +4422,8 @@ def normalize_reward_grants(
                     "relationship_deltas",
                     "hooks_add",
                     "hooks_remove",
+                    "hooks_add_public",
+                    "hooks_remove_public",
                 }
             }
         recipient_type = payload.get("recipient_type")
