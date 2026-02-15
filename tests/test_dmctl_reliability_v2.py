@@ -507,6 +507,28 @@ class TestDMCTLReliabilityV2(unittest.TestCase):
         self.assertTrue(validate["ok"])
         self.assertEqual(self._db_event_ids(), self._file_event_ids())
 
+    def test_11_turn_begin_after_initial_rollback_stays_one_based(self):
+        campaign_id = f"rollstart_{uuid.uuid4().hex[:8]}"
+        try:
+            run_dmctl("campaign", "create", "--campaign", campaign_id, "--name", "Rollback Start Probe")
+            first_begin = run_dmctl("turn", "begin", "--campaign", campaign_id)
+            self.assertEqual(first_begin["data"]["turn"]["turn_number"], 1)
+
+            run_dmctl(
+                "turn",
+                "rollback",
+                "--campaign",
+                campaign_id,
+                payload={"reason": "Initial rollback probe"},
+            )
+
+            second_begin = run_dmctl("turn", "begin", "--campaign", campaign_id)
+            self.assertEqual(second_begin["data"]["turn"]["turn_number"], 1)
+        finally:
+            cdir = CAMPAIGNS_ROOT / campaign_id
+            if cdir.exists():
+                shutil.rmtree(cdir)
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

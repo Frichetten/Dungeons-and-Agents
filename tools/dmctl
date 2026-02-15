@@ -3130,7 +3130,11 @@ def command_turn_begin(args: argparse.Namespace, payload: Dict[str, Any]) -> Tup
         raise DMError("open_turn_exists", {"campaign": campaign_id})
 
     next_turn = conn.execute(
-        "SELECT COALESCE(MAX(turn_number), 0) + 1 AS n FROM turns WHERE campaign_id = ?",
+        """
+        SELECT COALESCE(MAX(CASE WHEN turn_number > 0 THEN turn_number END), 0) + 1 AS n
+        FROM turns
+        WHERE campaign_id = ?
+        """,
         (campaign_id,),
     ).fetchone()["n"]
     ts = now_iso()

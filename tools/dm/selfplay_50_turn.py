@@ -591,16 +591,21 @@ def main() -> int:
     run_log_path = campaign_dir / "selfplay_run.json"
     run_log_path.write_text(json.dumps(run_log, indent=2) + "\n", encoding="utf-8")
 
+    failure_count = len(run_log["failures"])
+    validate_ok = bool(run_log["post_checks"]["validate_ok"])
+    success = failure_count == 0 and validate_ok
+
     output = {
-        "ok": True,
+        "ok": success,
         "campaign_id": campaign_id,
         "run_log": str(run_log_path),
-        "failure_count": len(run_log["failures"]),
+        "failure_count": failure_count,
+        "validate_ok": validate_ok,
         "latest_turn_number": run_log["post_checks"]["latest_turn_number"],
         "latest_turn_status": run_log["post_checks"]["latest_turn_status"],
     }
     print(json.dumps(output, indent=2))
-    return 0
+    return 0 if success else 1
 
 
 if __name__ == "__main__":
