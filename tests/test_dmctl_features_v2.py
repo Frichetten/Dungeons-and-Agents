@@ -536,6 +536,132 @@ class TestDMCTLFeaturesV2(unittest.TestCase):
         for npc in snapshot.get("npcs", []):
             self.assertNotIn("notes_hidden", npc)
 
+    def test_11_player_facing_recap_and_dashboard_hide_dm_hooks(self):
+        dm_hook = f"dm_secret_hook_{uuid.uuid4().hex[:6]}"
+        public_hook = f"public_hook_{uuid.uuid4().hex[:6]}"
+
+        run_dmctl("turn", "begin", "--campaign", self.campaign_id)
+        run_dmctl(
+            "world",
+            "pulse",
+            "--campaign",
+            self.campaign_id,
+            payload={
+                "hours": 0,
+                "add_hooks": [dm_hook],
+                "add_public_hooks": [public_hook],
+            },
+        )
+        run_dmctl("turn", "commit", "--campaign", self.campaign_id, "--summary", "Hook visibility gating")
+
+        dashboard = run_dmctl("ooc", "dashboard", "--campaign", self.campaign_id)
+        self.assertIn(public_hook, dashboard["data"]["next_payoff_hooks"])
+        self.assertNotIn(dm_hook, dashboard["data"]["next_payoff_hooks"])
+
+        recap = run_dmctl("recap", "generate", "--campaign", self.campaign_id)
+        self.assertIn(public_hook, recap["data"]["open_threads"])
+        self.assertNotIn(dm_hook, recap["data"]["open_threads"])
+
+        dashboard_dm = run_dmctl(
+            "ooc",
+            "dashboard",
+            "--campaign",
+            self.campaign_id,
+            payload={"include_hidden": True},
+        )
+        self.assertIn(dm_hook, dashboard_dm["data"]["next_payoff_hooks"])
+
+        recap_dm = run_dmctl("recap", "generate", "--campaign", self.campaign_id, "--include-hidden")
+        self.assertIn(dm_hook, recap_dm["data"]["open_threads"])
+
+        refresh = run_dmctl("ooc", "refresh", "--campaign", self.campaign_id)
+        self.assertIn(dm_hook, refresh["data"]["memory_packet"]["next_payoff_hooks"])
+
+    def test_12_turn_begin_and_load_skip_event_log_parity_scan(self):
+        events_path = CAMPAIGNS_ROOT / self.campaign_id / "events.ndjson"
+        with events_path.open("a", encoding="utf-8") as handle:
+            handle.write("not-json\n")
+
+        load = run_dmctl("campaign", "load", "--campaign", self.campaign_id)
+        self.assertTrue(load["data"]["continuity_summary"]["ok"])
+
+        begin = run_dmctl("turn", "begin", "--campaign", self.campaign_id)
+        self.assertTrue(begin["data"]["continuity_summary"]["ok"])
+
+        validate = run_dmctl("validate", "--campaign", self.campaign_id, expect_ok=False)
+        self.assertEqual(validate["error"], "validation_failed")
+        result = validate["details"]["results"][0]
+        self.assertIn("event_log_parity", result)
+        self.assertIn("parse_error", result["event_log_parity"])
+
+    def test_13_campaign_seed_applies_public_hooks_without_hooks_payload(self):
+        public_hook = f"seed_public_hook_{uuid.uuid4().hex[:6]}"
+
+        run_dmctl("turn", "begin", "--campaign", self.campaign_id)
+        run_dmctl(
+            "campaign",
+            "seed",
+            "--campaign",
+            self.campaign_id,
+            payload={"public_hooks": [public_hook]},
+        )
+        run_dmctl("turn", "commit", "--campaign", self.campaign_id, "--summary", "Seed public hooks only")
+
+        recap = run_dmctl("recap", "generate", "--campaign", self.campaign_id)
+        self.assertIn(public_hook, recap["data"]["open_threads"])
+
+    def test_14_reward_grant_shorthand_supports_public_hook_keys(self):
+        public_hook = f"reward_public_hook_{uuid.uuid4().hex[:6]}"
+
+        run_dmctl("turn", "begin", "--campaign", self.campaign_id)
+        reward = run_dmctl(
+            "reward",
+            "grant",
+            "--campaign",
+            self.campaign_id,
+            payload={
+                "recipient_type": "party",
+                "recipient_id": "party",
+                "hooks_add_public": [public_hook],
+            },
+        )
+        added = reward["data"]["reward_events"][0]["reward"]["hooks"]["added"]
+        self.assertIn(public_hook, added)
+
+        state = run_dmctl("state", "get", "--campaign", self.campaign_id, "--path", "world_state")
+        hooks = json.loads(state["data"]["value"]["unresolved_hooks_json"])
+        self.assertTrue(
+            any(row.get("text") == public_hook and row.get("visibility") == "public" for row in hooks)
+        )
+
+    def test_15_state_set_rejects_malformed_unresolved_hooks_payload(self):
+        existing_hook = f"existing_hook_{uuid.uuid4().hex[:6]}"
+
+        run_dmctl("turn", "begin", "--campaign", self.campaign_id)
+        run_dmctl(
+            "world",
+            "pulse",
+            "--campaign",
+            self.campaign_id,
+            payload={"hours": 0, "add_hooks": [existing_hook]},
+        )
+        run_dmctl("turn", "commit", "--campaign", self.campaign_id, "--summary", "Establish baseline hook")
+
+        run_dmctl("turn", "begin", "--campaign", self.campaign_id)
+        result = run_dmctl(
+            "state",
+            "set",
+            "--campaign",
+            self.campaign_id,
+            payload={"world_state": {"unresolved_hooks": "not-json"}},
+            expect_ok=False,
+        )
+        self.assertEqual(result["error"], "invalid_hook_collection")
+
+        state = run_dmctl("state", "get", "--campaign", self.campaign_id, "--path", "world_state")
+        hooks = json.loads(state["data"]["value"]["unresolved_hooks_json"])
+        self.assertTrue(any(row.get("text") == existing_hook for row in hooks))
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

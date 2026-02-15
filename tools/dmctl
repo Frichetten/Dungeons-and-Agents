@@ -64,6 +64,13 @@ DEFAULT_REFRESH_STATE_PATHS = (
 )
 REFRESH_MODES = {"auto", "compact", "full"}
 REFRESH_TRIGGERS = {"manual", "resume", "compaction_recovery"}
+HOOK_VISIBILITIES = {"dm", "public"}
+ENTITY_ID_TABLES = {
+    "pc": "player_characters",
+    "npc": "npcs",
+    "faction": "factions",
+    "location": "locations",
+}
 
 
 class DMError(Exception):
@@ -753,6 +760,87 @@ def ensure_item(
     return new_item_id
 
 
+def entity_exists(conn: sqlite3.Connection, campaign_id: str, entity_type: str, entity_id: str) -> bool:
+    table = ENTITY_ID_TABLES.get(entity_type)
+    if table is None:
+        raise DMError("invalid_entity_type", {"entity_type": entity_type, "allowed": sorted(ENTITY_ID_TABLES.keys())})
+    row = conn.execute(
+        f"SELECT 1 FROM {table} WHERE campaign_id = ? AND id = ? LIMIT 1",
+        (campaign_id, entity_id),
+    ).fetchone()
+    return row is not None
+
+
+def ensure_relationship_endpoint_exists(
+    conn: sqlite3.Connection,
+    campaign_id: str,
+    endpoint_type: str,
+    endpoint_id: str,
+    *,
+    field: str,
+) -> None:
+    normalized_type = str(endpoint_type).strip().lower()
+    normalized_id = str(endpoint_id).strip()
+    if normalized_type not in ENTITY_ID_TABLES:
+        raise DMError(
+            "invalid_relationship_type",
+            {"field": field, "value": endpoint_type, "allowed": sorted(ENTITY_ID_TABLES.keys())},
+        )
+    if not normalized_id:
+        raise DMError("invalid_relationship_payload", {"missing": field})
+    if not entity_exists(conn, campaign_id, normalized_type, normalized_id):
+        raise DMError(
+            "relationship_endpoint_not_found",
+            {"campaign": campaign_id, "field": field, "entity_type": normalized_type, "entity_id": normalized_id},
+        )
+
+
+def ensure_inventory_owner_exists(
+    conn: sqlite3.Connection,
+    campaign_id: str,
+    owner_type: str,
+    owner_id: str,
+) -> None:
+    normalized_type = str(owner_type).strip().lower()
+    normalized_id = str(owner_id).strip()
+    if normalized_type not in {"pc", "npc", "party"}:
+        raise DMError("invalid_owner_type", {"owner_type": owner_type})
+    if not normalized_id:
+        raise DMError("owner_id_required", {})
+    if normalized_type == "party":
+        if normalized_id != "party":
+            raise DMError("invalid_party_owner_id", {"owner_id": owner_id, "expected": "party"})
+        return
+    if not entity_exists(conn, campaign_id, normalized_type, normalized_id):
+        raise DMError(
+            "inventory_owner_not_found",
+            {"campaign": campaign_id, "owner_type": normalized_type, "owner_id": normalized_id},
+        )
+
+
+def ensure_reward_recipient_exists(
+    conn: sqlite3.Connection,
+    campaign_id: str,
+    recipient_type: str,
+    recipient_id: str,
+) -> None:
+    normalized_type = str(recipient_type).strip().lower()
+    normalized_id = str(recipient_id).strip()
+    if normalized_type not in {"pc", "npc", "faction", "party"}:
+        raise DMError("invalid_reward_recipient_type", {"recipient_type": recipient_type})
+    if not normalized_id:
+        raise DMError("invalid_reward_payload", {"error": "recipient_id is required"})
+    if normalized_type == "party":
+        if normalized_id != "party":
+            raise DMError("invalid_party_owner_id", {"owner_id": recipient_id, "expected": "party"})
+        return
+    if not entity_exists(conn, campaign_id, normalized_type, normalized_id):
+        raise DMError(
+            "reward_recipient_not_found",
+            {"campaign": campaign_id, "recipient_type": normalized_type, "recipient_id": normalized_id},
+        )
+
+
 QUEST_STATUS_ALLOWED = ("open", "in_progress", "completed", "failed")
 QUEST_OBJECTIVE_STATUS_ALLOWED = ("open", "complete", "failed")
 
@@ -808,10 +896,9 @@ def upsert_inventory_quantity(
     item_id: str,
     delta: int,
 ) -> int:
-    if owner_type not in {"pc", "npc", "party"}:
-        raise DMError("invalid_owner_type", {"owner_type": owner_type})
-    if not owner_id:
-        raise DMError("owner_id_required", {})
+    owner_type = str(owner_type).strip().lower()
+    owner_id = str(owner_id).strip()
+    ensure_inventory_owner_exists(conn, campaign_id, owner_type, owner_id)
 
     existing = conn.execute(
         """
@@ -1118,6 +1205,81 @@ def json_load(value: Any, default: Any) -> Any:
         return json.loads(value)
     except Exception:
         return default
+
+
+def normalize_hook_entry(entry: Any, *, default_visibility: str = "dm", strict: bool = False) -> Optional[Dict[str, str]]:
+    text = ""
+    visibility = default_visibility
+
+    if isinstance(entry, dict):
+        text = str(entry.get("text", "")).strip()
+        visibility = str(entry.get("visibility", default_visibility)).strip().lower() or default_visibility
+    else:
+        text = str(entry).strip()
+        visibility = str(default_visibility).strip().lower() or "dm"
+
+    if not text:
+        if strict:
+            raise DMError("invalid_hook_entry", {"entry": entry, "reason": "missing_text"})
+        return None
+    if visibility not in HOOK_VISIBILITIES:
+        if strict:
+            raise DMError(
+                "invalid_hook_visibility",
+                {"entry": entry, "visibility": visibility, "allowed": sorted(HOOK_VISIBILITIES)},
+            )
+        return None
+
+    return {"text": text, "visibility": visibility}
+
+
+def load_unresolved_hooks(raw: Any, *, default_visibility: str = "dm", strict: bool = False) -> List[Dict[str, str]]:
+    if strict:
+        if raw in (None, ""):
+            parsed = []
+        elif isinstance(raw, list):
+            parsed = raw
+        elif isinstance(raw, str):
+            try:
+                parsed = json.loads(raw)
+            except Exception:
+                raise DMError("invalid_hook_collection", {"hooks": raw, "reason": "invalid_json"})
+        else:
+            parsed = raw
+    else:
+        parsed = json_load(raw, [])
+    if not isinstance(parsed, list):
+        if strict:
+            raise DMError("invalid_hook_collection", {"hooks": raw})
+        return []
+
+    hooks: List[Dict[str, str]] = []
+    seen: set[Tuple[str, str]] = set()
+    for entry in parsed:
+        normalized = normalize_hook_entry(entry, default_visibility=default_visibility, strict=strict)
+        if normalized is None:
+            continue
+        key = (normalized["visibility"], normalized["text"])
+        if key in seen:
+            continue
+        hooks.append(normalized)
+        seen.add(key)
+    return hooks
+
+
+def dump_unresolved_hooks(hooks: List[Dict[str, str]]) -> str:
+    return json.dumps(hooks, separators=(",", ":"))
+
+
+def filter_hook_texts(hooks: List[Dict[str, str]], *, include_hidden: bool) -> List[str]:
+    values: List[str] = []
+    for hook in hooks:
+        visibility = str(hook.get("visibility", "dm"))
+        if visibility == "public" or include_hidden:
+            text = str(hook.get("text", "")).strip()
+            if text and text not in values:
+                values.append(text)
+    return values
 
 
 def response_full(args: argparse.Namespace, payload: Dict[str, Any]) -> bool:
@@ -2110,7 +2272,7 @@ def parse_turn_id(turn: Optional[sqlite3.Row]) -> Optional[int]:
     return safe_int(turn["id"], "turn_id")
 
 
-def validate_campaign_state(campaign_id: str) -> Dict[str, Any]:
+def validate_campaign_state(campaign_id: str, *, include_event_log_parity: bool = True) -> Dict[str, Any]:
     errors: List[str] = []
     warnings: List[str] = []
     event_log_parity: Optional[Dict[str, Any]] = None
@@ -2200,6 +2362,90 @@ def validate_campaign_state(campaign_id: str) -> Dict[str, Any]:
         if staged_events and staged_events["c"] > 0 and (open_turns is None or open_turns["c"] == 0):
             errors.append("staged events found without an open turn")
 
+        relationship_orphans: Dict[str, int] = {}
+        for endpoint_field, endpoint_type_field in (
+            ("source_id", "source_type"),
+            ("target_id", "target_type"),
+        ):
+            for endpoint_type, table_name in ENTITY_ID_TABLES.items():
+                row = conn.execute(
+                    f"""
+                    SELECT COUNT(*) AS c
+                    FROM relationships r
+                    WHERE r.campaign_id = ? AND r.{endpoint_type_field} = ?
+                      AND NOT EXISTS (
+                        SELECT 1 FROM {table_name} t
+                        WHERE t.campaign_id = r.campaign_id AND t.id = r.{endpoint_field}
+                      )
+                    """,
+                    (campaign_id, endpoint_type),
+                ).fetchone()
+                count = safe_int(row["c"], "relationship_orphan_count") if row else 0
+                if count > 0:
+                    relationship_orphans[f"{endpoint_type_field}:{endpoint_type}"] = count
+        if relationship_orphans:
+            errors.append(f"orphan relationship endpoints found: {relationship_orphans}")
+
+        inventory_orphans: Dict[str, int] = {}
+        for owner_type, table_name in (("pc", "player_characters"), ("npc", "npcs")):
+            row = conn.execute(
+                f"""
+                SELECT COUNT(*) AS c
+                FROM inventories i
+                WHERE i.campaign_id = ? AND i.owner_type = ?
+                  AND NOT EXISTS (
+                    SELECT 1 FROM {table_name} t
+                    WHERE t.campaign_id = i.campaign_id AND t.id = i.owner_id
+                  )
+                """,
+                (campaign_id, owner_type),
+            ).fetchone()
+            count = safe_int(row["c"], "inventory_orphan_count") if row else 0
+            if count > 0:
+                inventory_orphans[owner_type] = count
+        bad_party_inventory = conn.execute(
+            """
+            SELECT COUNT(*) AS c
+            FROM inventories
+            WHERE campaign_id = ? AND owner_type = 'party' AND owner_id != 'party'
+            """,
+            (campaign_id,),
+        ).fetchone()
+        if bad_party_inventory and safe_int(bad_party_inventory["c"], "bad_party_inventory") > 0:
+            inventory_orphans["party"] = safe_int(bad_party_inventory["c"], "bad_party_inventory")
+        if inventory_orphans:
+            errors.append(f"invalid inventory owners found: {inventory_orphans}")
+
+        reward_orphans: Dict[str, int] = {}
+        for recipient_type, table_name in (("pc", "player_characters"), ("npc", "npcs"), ("faction", "factions")):
+            row = conn.execute(
+                f"""
+                SELECT COUNT(*) AS c
+                FROM reward_events r
+                WHERE r.campaign_id = ? AND r.recipient_type = ?
+                  AND NOT EXISTS (
+                    SELECT 1 FROM {table_name} t
+                    WHERE t.campaign_id = r.campaign_id AND t.id = r.recipient_id
+                  )
+                """,
+                (campaign_id, recipient_type),
+            ).fetchone()
+            count = safe_int(row["c"], "reward_orphan_count") if row else 0
+            if count > 0:
+                reward_orphans[recipient_type] = count
+        bad_party_rewards = conn.execute(
+            """
+            SELECT COUNT(*) AS c
+            FROM reward_events
+            WHERE campaign_id = ? AND recipient_type = 'party' AND recipient_id != 'party'
+            """,
+            (campaign_id,),
+        ).fetchone()
+        if bad_party_rewards and safe_int(bad_party_rewards["c"], "bad_party_rewards") > 0:
+            reward_orphans["party"] = safe_int(bad_party_rewards["c"], "bad_party_rewards")
+        if reward_orphans:
+            errors.append(f"invalid reward recipients found: {reward_orphans}")
+
         if snap_path.exists():
             try:
                 snap = json.loads(snap_path.read_text(encoding="utf-8"))
@@ -2208,7 +2454,7 @@ def validate_campaign_state(campaign_id: str) -> Dict[str, Any]:
             except Exception as exc:
                 errors.append(f"invalid snapshot JSON: {exc}")
 
-        if event_path.exists():
+        if include_event_log_parity and event_path.exists():
             parity = collect_event_log_parity(conn, campaign_id)
             event_log_parity = parity["details"]
             parse_error = parity["details"].get("parse_error")
@@ -2393,7 +2639,7 @@ def command_campaign_load(args: argparse.Namespace, _payload: Dict[str, Any]) ->
         (campaign_id, campaign_id, campaign_id, campaign_id, campaign_id),
     ).fetchone()
 
-    continuity = validate_campaign_state(campaign_id)
+    continuity = validate_campaign_state(campaign_id, include_event_log_parity=False)
     conn.close()
     continuity_summary = {
         "ok": not continuity.get("errors"),
@@ -2636,8 +2882,9 @@ def command_campaign_seed(args: argparse.Namespace, payload: Dict[str, Any]) -> 
             fields.append("location_id = ?")
             values.append(location_id)
         if "unresolved_hooks" in world_state:
+            normalized_hooks = load_unresolved_hooks(world_state["unresolved_hooks"], default_visibility="dm", strict=True)
             fields.append("unresolved_hooks_json = ?")
-            values.append(json.dumps(world_state["unresolved_hooks"], separators=(",", ":")))
+            values.append(dump_unresolved_hooks(normalized_hooks))
         if fields:
             fields.append("updated_at = ?")
             values.append(ts)
@@ -2648,10 +2895,35 @@ def command_campaign_seed(args: argparse.Namespace, payload: Dict[str, Any]) -> 
             )
 
     hooks = payload.get("hooks")
-    if hooks is not None:
+    public_hooks = payload.get("public_hooks")
+    if hooks is not None or public_hooks is not None:
+        if hooks is not None:
+            normalized_hooks = load_unresolved_hooks(hooks, default_visibility="dm", strict=True)
+        else:
+            existing_world_row = conn.execute(
+                "SELECT unresolved_hooks_json FROM world_state WHERE campaign_id = ?",
+                (campaign_id,),
+            ).fetchone()
+            normalized_hooks = load_unresolved_hooks(
+                existing_world_row["unresolved_hooks_json"] if existing_world_row else "[]",
+                default_visibility="dm",
+                strict=True,
+            )
+        hook_keys = {(row["visibility"], row["text"]) for row in normalized_hooks}
+        public_hooks_list = public_hooks if public_hooks is not None else []
+        if not isinstance(public_hooks_list, list):
+            raise DMError("invalid_hook_collection", {"public_hooks": public_hooks_list})
+        for hook in public_hooks_list:
+            normalized = normalize_hook_entry(hook, default_visibility="public", strict=True)
+            if normalized:
+                key = (normalized["visibility"], normalized["text"])
+                if key in hook_keys:
+                    continue
+                normalized_hooks.append(normalized)
+                hook_keys.add(key)
         conn.execute(
             "UPDATE world_state SET unresolved_hooks_json = ?, updated_at = ? WHERE campaign_id = ?",
-            (json.dumps(hooks, separators=(",", ":")), ts, campaign_id),
+            (dump_unresolved_hooks(normalized_hooks), ts, campaign_id),
         )
 
     main_arc = payload.get("main_arc")
@@ -2893,7 +3165,7 @@ def command_turn_begin(args: argparse.Namespace, payload: Dict[str, Any]) -> Tup
         },
     )
     conn.commit()
-    continuity = validate_campaign_state(campaign_id)
+    continuity = validate_campaign_state(campaign_id, include_event_log_parity=False)
     continuity_summary = {
         "ok": not continuity.get("errors"),
         "error_count": len(continuity.get("errors", [])),
@@ -3626,15 +3898,21 @@ def command_state_set(args: argparse.Namespace, payload: Dict[str, Any]) -> Tupl
                     values.append(parsed_day_index)
                 continue
             if key == "unresolved_hooks":
+                normalized_hooks = load_unresolved_hooks(value, default_visibility="dm", strict=True)
                 fields.append("unresolved_hooks_json = ?")
-                values.append(json.dumps(value, separators=(",", ":")))
+                values.append(dump_unresolved_hooks(normalized_hooks))
                 continue
             if key == "consequence_clocks":
                 fields.append("consequence_clocks_json = ?")
                 values.append(json.dumps(value, separators=(",", ":")))
                 continue
+            if key == "unresolved_hooks_json":
+                normalized_hooks = load_unresolved_hooks(value, default_visibility="dm", strict=True)
+                fields.append("unresolved_hooks_json = ?")
+                values.append(dump_unresolved_hooks(normalized_hooks))
+                continue
             fields.append(f"{key} = ?")
-            if key in {"unresolved_hooks_json", "consequence_clocks_json"} and not isinstance(value, str):
+            if key == "consequence_clocks_json" and not isinstance(value, str):
                 values.append(json.dumps(value, separators=(",", ":")))
             else:
                 values.append(value)
@@ -3941,10 +4219,24 @@ def command_relationship_adjust(args: argparse.Namespace, payload: Dict[str, Any
     turn = require_open_turn(conn, campaign_id)
     turn_id = safe_int(turn["id"], "turn_id")
 
-    source_type = str(payload["source_type"])
-    source_id = str(payload["source_id"])
-    target_type = str(payload["target_type"])
-    target_id = str(payload["target_id"])
+    source_type = str(payload["source_type"]).strip().lower()
+    source_id = str(payload["source_id"]).strip()
+    target_type = str(payload["target_type"]).strip().lower()
+    target_id = str(payload["target_id"]).strip()
+    ensure_relationship_endpoint_exists(
+        conn,
+        campaign_id,
+        source_type,
+        source_id,
+        field="source_id",
+    )
+    ensure_relationship_endpoint_exists(
+        conn,
+        campaign_id,
+        target_type,
+        target_id,
+        field="target_id",
+    )
 
     row = conn.execute(
         """
@@ -4038,10 +4330,24 @@ def apply_relationship_delta(
         if key not in relation:
             raise DMError("invalid_relationship_payload", {"missing": key})
 
-    source_type = str(relation["source_type"])
-    source_id = str(relation["source_id"])
-    target_type = str(relation["target_type"])
-    target_id = str(relation["target_id"])
+    source_type = str(relation["source_type"]).strip().lower()
+    source_id = str(relation["source_id"]).strip()
+    target_type = str(relation["target_type"]).strip().lower()
+    target_id = str(relation["target_id"]).strip()
+    ensure_relationship_endpoint_exists(
+        conn,
+        campaign_id,
+        source_type,
+        source_id,
+        field="source_id",
+    )
+    ensure_relationship_endpoint_exists(
+        conn,
+        campaign_id,
+        target_type,
+        target_id,
+        field="target_id",
+    )
     ts = now_iso()
 
     row = conn.execute(
@@ -4129,6 +4435,8 @@ def normalize_reward_grants(
                     "relationship_deltas",
                     "hooks_add",
                     "hooks_remove",
+                    "hooks_add_public",
+                    "hooks_remove_public",
                 }
             }
         recipient_type = payload.get("recipient_type")
@@ -4171,13 +4479,12 @@ def apply_reward_grants(
 ) -> List[Dict[str, Any]]:
     created_events: List[Dict[str, Any]] = []
     for grant in grants:
-        recipient_type = str(grant["recipient_type"])
-        recipient_id = str(grant["recipient_id"])
+        recipient_type = str(grant["recipient_type"]).strip().lower()
+        recipient_id = str(grant["recipient_id"]).strip()
         reward = grant["reward"]
         ts = now_iso()
 
-        if recipient_type not in {"pc", "npc", "party", "faction"}:
-            raise DMError("invalid_reward_recipient_type", {"recipient_type": recipient_type})
+        ensure_reward_recipient_exists(conn, campaign_id, recipient_type, recipient_id)
 
         applied: Dict[str, Any] = {
             "recipient_type": recipient_type,
@@ -4321,25 +4628,60 @@ def apply_reward_grants(
 
         hooks_add = reward.get("hooks_add", [])
         hooks_remove = reward.get("hooks_remove", [])
+        hooks_add_public = reward.get("hooks_add_public", [])
+        hooks_remove_public = reward.get("hooks_remove_public", [])
         if hooks_add or hooks_remove:
             if not isinstance(hooks_add, list) or not isinstance(hooks_remove, list):
                 raise DMError("invalid_reward_payload", {"error": "hooks_add/remove must be lists"})
+        if hooks_add_public or hooks_remove_public:
+            if not isinstance(hooks_add_public, list) or not isinstance(hooks_remove_public, list):
+                raise DMError("invalid_reward_payload", {"error": "hooks_add_public/remove_public must be lists"})
+        if hooks_add or hooks_remove or hooks_add_public or hooks_remove_public:
             ws_row = conn.execute(
                 "SELECT unresolved_hooks_json FROM world_state WHERE campaign_id = ?",
                 (campaign_id,),
             ).fetchone()
-            hooks = json_load(ws_row["unresolved_hooks_json"] if ws_row else "[]", [])
+            hooks = load_unresolved_hooks(ws_row["unresolved_hooks_json"] if ws_row else "[]", default_visibility="dm")
+            hook_keys = {(hook["visibility"], hook["text"]) for hook in hooks}
             for hook in hooks_add:
-                if hook not in hooks:
-                    hooks.append(hook)
-                    applied["hooks"]["added"].append(hook)
+                normalized = normalize_hook_entry(hook, default_visibility="dm", strict=True)
+                if normalized is None:
+                    continue
+                key = (normalized["visibility"], normalized["text"])
+                if key not in hook_keys:
+                    hooks.append(normalized)
+                    hook_keys.add(key)
+                    applied["hooks"]["added"].append(normalized["text"])
             for hook in hooks_remove:
-                if hook in hooks:
-                    hooks = [entry for entry in hooks if entry != hook]
-                    applied["hooks"]["removed"].append(hook)
+                normalized = normalize_hook_entry(hook, default_visibility="dm", strict=True)
+                if normalized is None:
+                    continue
+                key = (normalized["visibility"], normalized["text"])
+                if key in hook_keys:
+                    hooks = [entry for entry in hooks if (entry["visibility"], entry["text"]) != key]
+                    hook_keys.remove(key)
+                    applied["hooks"]["removed"].append(normalized["text"])
+            for hook in hooks_add_public:
+                normalized = normalize_hook_entry(hook, default_visibility="public", strict=True)
+                if normalized is None:
+                    continue
+                key = (normalized["visibility"], normalized["text"])
+                if key not in hook_keys:
+                    hooks.append(normalized)
+                    hook_keys.add(key)
+                    applied["hooks"]["added"].append(normalized["text"])
+            for hook in hooks_remove_public:
+                normalized = normalize_hook_entry(hook, default_visibility="public", strict=True)
+                if normalized is None:
+                    continue
+                key = (normalized["visibility"], normalized["text"])
+                if key in hook_keys:
+                    hooks = [entry for entry in hooks if (entry["visibility"], entry["text"]) != key]
+                    hook_keys.remove(key)
+                    applied["hooks"]["removed"].append(normalized["text"])
             conn.execute(
                 "UPDATE world_state SET unresolved_hooks_json = ?, updated_at = ? WHERE campaign_id = ?",
-                (json.dumps(hooks, separators=(",", ":")), ts, campaign_id),
+                (dump_unresolved_hooks(hooks), ts, campaign_id),
             )
 
         event_id = uuid_id("reward")
@@ -5365,14 +5707,61 @@ def command_world_pulse(args: argparse.Namespace, payload: Dict[str, Any]) -> Tu
         "SELECT unresolved_hooks_json FROM world_state WHERE campaign_id = ?",
         (campaign_id,),
     ).fetchone()
-    hooks = json_load(ws_row["unresolved_hooks_json"] if ws_row else "[]", [])
-    for item in payload.get("add_hooks", []):
-        if item not in hooks:
-            hooks.append(item)
+    hooks = load_unresolved_hooks(ws_row["unresolved_hooks_json"] if ws_row else "[]", default_visibility="dm")
+    hook_keys = {(hook["visibility"], hook["text"]) for hook in hooks}
+
+    add_hooks = payload.get("add_hooks", [])
+    add_public_hooks = payload.get("add_public_hooks", [])
+    remove_hooks = payload.get("remove_hooks", [])
+    remove_public_hooks = payload.get("remove_public_hooks", [])
+
+    for hook_list_name, hook_values in (
+        ("add_hooks", add_hooks),
+        ("add_public_hooks", add_public_hooks),
+        ("remove_hooks", remove_hooks),
+        ("remove_public_hooks", remove_public_hooks),
+    ):
+        if not isinstance(hook_values, list):
+            raise DMError("invalid_hook_collection", {hook_list_name: hook_values})
+
+    for item in add_hooks:
+        normalized = normalize_hook_entry(item, default_visibility="dm", strict=True)
+        if normalized is None:
+            continue
+        key = (normalized["visibility"], normalized["text"])
+        if key not in hook_keys:
+            hooks.append(normalized)
+            hook_keys.add(key)
             summary["hooks_added"] += 1
-    for item in payload.get("remove_hooks", []):
-        if item in hooks:
-            hooks = [entry for entry in hooks if entry != item]
+
+    for item in add_public_hooks:
+        normalized = normalize_hook_entry(item, default_visibility="public", strict=True)
+        if normalized is None:
+            continue
+        key = (normalized["visibility"], normalized["text"])
+        if key not in hook_keys:
+            hooks.append(normalized)
+            hook_keys.add(key)
+            summary["hooks_added"] += 1
+
+    for item in remove_hooks:
+        normalized = normalize_hook_entry(item, default_visibility="dm", strict=True)
+        if normalized is None:
+            continue
+        key = (normalized["visibility"], normalized["text"])
+        if key in hook_keys:
+            hooks = [entry for entry in hooks if (entry["visibility"], entry["text"]) != key]
+            hook_keys.remove(key)
+            summary["hooks_removed"] += 1
+
+    for item in remove_public_hooks:
+        normalized = normalize_hook_entry(item, default_visibility="public", strict=True)
+        if normalized is None:
+            continue
+        key = (normalized["visibility"], normalized["text"])
+        if key in hook_keys:
+            hooks = [entry for entry in hooks if (entry["visibility"], entry["text"]) != key]
+            hook_keys.remove(key)
             summary["hooks_removed"] += 1
 
     agenda_rows = to_jsonable(
@@ -5484,10 +5873,15 @@ def command_world_pulse(args: argparse.Namespace, payload: Dict[str, Any]) -> Tu
                 rule_hooks = [single_hook] if single_hook else []
             if not isinstance(rule_hooks, list):
                 rule_hooks = [str(rule_hooks)]
+            default_visibility = str(agenda_payload.get("visibility", "dm")).strip().lower() or "dm"
             for hook in rule_hooks:
-                hook_text = str(hook)
-                if hook_text and hook_text not in hooks:
-                    hooks.append(hook_text)
+                normalized = normalize_hook_entry(hook, default_visibility=default_visibility, strict=True)
+                if normalized is None:
+                    continue
+                key = (normalized["visibility"], normalized["text"])
+                if key not in hook_keys:
+                    hooks.append(normalized)
+                    hook_keys.add(key)
                     summary["hooks_added"] += 1
                     applied = True
         elif effect_type == "rumor_shift":
@@ -5534,7 +5928,7 @@ def command_world_pulse(args: argparse.Namespace, payload: Dict[str, Any]) -> Tu
 
     conn.execute(
         "UPDATE world_state SET unresolved_hooks_json = ?, updated_at = ? WHERE campaign_id = ?",
-        (json.dumps(hooks, separators=(",", ":")), now_iso(), campaign_id),
+        (dump_unresolved_hooks(hooks), now_iso(), campaign_id),
     )
 
     reveal_candidates = to_jsonable(
@@ -5787,12 +6181,14 @@ def command_travel_resolve(args: argparse.Namespace, payload: Dict[str, Any]) ->
                 "SELECT unresolved_hooks_json FROM world_state WHERE campaign_id = ?",
                 (campaign_id,),
             ).fetchone()
-            hooks = json_load(ws_row["unresolved_hooks_json"] if ws_row else "[]", [])
-            if shortage_hook not in hooks:
-                hooks.append(shortage_hook)
+            hooks = load_unresolved_hooks(ws_row["unresolved_hooks_json"] if ws_row else "[]", default_visibility="dm")
+            hook_entry = normalize_hook_entry(shortage_hook, default_visibility="dm", strict=True)
+            hook_keys = {(entry["visibility"], entry["text"]) for entry in hooks}
+            if hook_entry and (hook_entry["visibility"], hook_entry["text"]) not in hook_keys:
+                hooks.append(hook_entry)
             conn.execute(
                 "UPDATE world_state SET unresolved_hooks_json = ?, updated_at = ? WHERE campaign_id = ?",
-                (json.dumps(hooks, separators=(",", ":")), now_iso(), campaign_id),
+                (dump_unresolved_hooks(hooks), now_iso(), campaign_id),
             )
             pressure_name = str(payload.get("ration_pressure_clock_name", "Supply Pressure"))
             clock_row = conn.execute(
@@ -6092,12 +6488,19 @@ def fetch_active_pressures(conn: sqlite3.Connection, campaign_id: str) -> Dict[s
     }
 
 
-def fetch_next_payoff_hooks(conn: sqlite3.Connection, campaign_id: str, *, limit: int = 8) -> List[str]:
+def fetch_next_payoff_hooks(
+    conn: sqlite3.Connection,
+    campaign_id: str,
+    *,
+    limit: int = 8,
+    include_hidden: bool = False,
+) -> List[str]:
     ws_row = conn.execute(
         "SELECT unresolved_hooks_json FROM world_state WHERE campaign_id = ?",
         (campaign_id,),
     ).fetchone()
-    hooks = [str(item) for item in json_load(ws_row["unresolved_hooks_json"] if ws_row else "[]", [])]
+    stored_hooks = load_unresolved_hooks(ws_row["unresolved_hooks_json"] if ws_row else "[]", default_visibility="dm")
+    hooks = filter_hook_texts(stored_hooks, include_hidden=include_hidden)
     near_complete = to_jsonable(
         conn.execute(
             """
@@ -6283,7 +6686,11 @@ def command_ooc_refresh(args: argparse.Namespace, payload: Dict[str, Any]) -> Tu
 
     full_mode = mode_used == "full"
 
-    dashboard_payload: Dict[str, Any] = {"rewards_limit": rewards_limit, "hooks_limit": hooks_limit}
+    dashboard_payload: Dict[str, Any] = {
+        "rewards_limit": rewards_limit,
+        "hooks_limit": hooks_limit,
+        "include_hidden": include_hidden,
+    }
     if full_mode:
         dashboard_payload["full"] = True
     dashboard_data_raw, dashboard_warnings = command_ooc(
@@ -6293,7 +6700,12 @@ def command_ooc_refresh(args: argparse.Namespace, payload: Dict[str, Any]) -> Tu
     warnings.extend(dashboard_warnings)
     dashboard_data = strip_ui_fields(dashboard_data_raw)
 
-    recap_payload: Dict[str, Any] = {"limit": turn_limit, "rewards_limit": rewards_limit, "hooks_limit": hooks_limit}
+    recap_payload: Dict[str, Any] = {
+        "limit": turn_limit,
+        "rewards_limit": rewards_limit,
+        "hooks_limit": hooks_limit,
+        "include_hidden": include_hidden,
+    }
     if full_mode:
         recap_payload["full"] = True
     recap_data_raw, recap_warnings = command_recap_generate(
@@ -6645,6 +7057,7 @@ def command_ooc(args: argparse.Namespace, payload: Dict[str, Any]) -> Tuple[Dict
 
     if action == "dashboard":
         full_response = response_full(args, payload)
+        include_hidden = safe_bool(payload.get("include_hidden"), "include_hidden", default=bool(args.include_hidden))
         campaign = conn.execute(
             "SELECT id, name, status, created_at, last_played_at FROM campaigns WHERE id = ?",
             (campaign_id,),
@@ -6682,6 +7095,7 @@ def command_ooc(args: argparse.Namespace, payload: Dict[str, Any]) -> Tuple[Dict
             conn,
             campaign_id,
             limit=max(1, safe_int(payload.get("hooks_limit", 8), "hooks_limit")),
+            include_hidden=include_hidden,
         )
         conn.close()
         return ooc_response(
@@ -7571,6 +7985,7 @@ def command_recap_generate(args: argparse.Namespace, payload: Dict[str, Any]) ->
     campaign_id = require_campaign(args.campaign)
     limit = safe_int(payload.get("limit", 5), "limit")
     full_response = response_full(args, payload)
+    include_hidden = safe_bool(payload.get("include_hidden"), "include_hidden", default=bool(args.include_hidden))
     if limit <= 0:
         limit = 5
 
@@ -7648,7 +8063,12 @@ def command_recap_generate(args: argparse.Namespace, payload: Dict[str, Any]) ->
     ).fetchone()
     recent_rewards = fetch_recent_rewards(conn, campaign_id, limit=max(1, safe_int(payload.get("rewards_limit", 5), "rewards_limit")))
     active_pressures = fetch_active_pressures(conn, campaign_id)
-    next_payoff_hooks = fetch_next_payoff_hooks(conn, campaign_id, limit=max(1, safe_int(payload.get("hooks_limit", 8), "hooks_limit")))
+    next_payoff_hooks = fetch_next_payoff_hooks(
+        conn,
+        campaign_id,
+        limit=max(1, safe_int(payload.get("hooks_limit", 8), "hooks_limit")),
+        include_hidden=include_hidden,
+    )
 
     conn.close()
 
@@ -7684,7 +8104,8 @@ def command_recap_generate(args: argparse.Namespace, payload: Dict[str, Any]) ->
         for clock in active_clocks:
             lines.append(f"- {clock['name']}: {clock['current_segments']}/{clock['max_segments']}")
 
-    hooks = json_load(unresolved_hooks_row["unresolved_hooks_json"] if unresolved_hooks_row else "[]", [])
+    hook_rows = load_unresolved_hooks(unresolved_hooks_row["unresolved_hooks_json"] if unresolved_hooks_row else "[]")
+    hooks = filter_hook_texts(hook_rows, include_hidden=include_hidden)
     if hooks:
         lines.append("Open threads:")
         for hook in hooks:
@@ -8025,6 +8446,15 @@ def error_hint(error: str) -> Optional[str]:
         "invalid_refresh_mode": "Use refresh mode: auto, compact, or full.",
         "invalid_refresh_trigger": "Use refresh trigger: manual, resume, or compaction_recovery.",
         "invalid_refresh_state_paths": "Pass state_paths as a non-empty comma-separated string or array.",
+        "relationship_endpoint_not_found": "Use an existing source/target entity id for the selected relationship type.",
+        "inventory_owner_not_found": "Use an existing pc/npc id, or owner_type=party with owner_id=party.",
+        "invalid_party_owner_id": "For party-owned records, owner_id must be 'party'.",
+        "reward_recipient_not_found": "Use an existing recipient id for the chosen recipient_type.",
+        "invalid_hook_collection": "Pass hooks as a JSON array of strings or {text, visibility} objects.",
+        "invalid_hook_visibility": "Hook visibility must be one of: dm, public.",
+        "invalid_hook_entry": "Hook entries must include non-empty text.",
+        "invalid_relationship_type": "Relationship endpoint types must be one of: pc, npc, faction, location.",
+        "invalid_entity_type": "Entity type must be one of: pc, npc, faction, location.",
     }
     return hints.get(error)
 
@@ -8046,6 +8476,15 @@ def error_message(error: str) -> str:
         "invalid_refresh_mode": "Refresh mode value is invalid.",
         "invalid_refresh_trigger": "Refresh trigger value is invalid.",
         "invalid_refresh_state_paths": "Refresh state_paths value is invalid.",
+        "relationship_endpoint_not_found": "Relationship endpoint was not found.",
+        "inventory_owner_not_found": "Inventory owner was not found.",
+        "invalid_party_owner_id": "Party owner ID must be 'party'.",
+        "reward_recipient_not_found": "Reward recipient was not found.",
+        "invalid_hook_collection": "Hook collection value is invalid.",
+        "invalid_hook_visibility": "Hook visibility value is invalid.",
+        "invalid_hook_entry": "Hook entry value is invalid.",
+        "invalid_relationship_type": "Relationship type value is invalid.",
+        "invalid_entity_type": "Entity type value is invalid.",
     }
     return mapping.get(error, error.replace("_", " "))
 

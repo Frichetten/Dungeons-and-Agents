@@ -1,9 +1,11 @@
 import json
 import random
+import sqlite3
 import shutil
 import subprocess
 import unittest
 import uuid
+from datetime import datetime, timezone
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -115,6 +117,114 @@ class TestDMCTLValidationV2(unittest.TestCase):
             self.assertIn(key, parity)
         self.assertGreater(parity["file_count"], parity["db_count"])
         self.assertIn("parse_error", parity)
+
+    def test_runtime_rejects_missing_relationship_and_inventory_owners(self):
+        bad_relationship = run_dmctl(
+            "relationship",
+            "adjust",
+            "--campaign",
+            self.campaign_id,
+            payload={
+                "source_type": "pc",
+                "source_id": "pc_missing",
+                "target_type": "npc",
+                "target_id": "npc_missing",
+                "trust_delta": 1,
+            },
+            expect_ok=False,
+        )
+        self.assertEqual(bad_relationship["error"], "relationship_endpoint_not_found")
+
+        bad_inventory = run_dmctl(
+            "item",
+            "grant",
+            "--campaign",
+            self.campaign_id,
+            payload={
+                "owner_type": "pc",
+                "owner_id": "pc_missing",
+                "item_name": "Validation Arrow",
+                "quantity": 1,
+            },
+            expect_ok=False,
+        )
+        self.assertEqual(bad_inventory["error"], "inventory_owner_not_found")
+
+        bad_party_owner = run_dmctl(
+            "item",
+            "grant",
+            "--campaign",
+            self.campaign_id,
+            payload={
+                "owner_type": "party",
+                "owner_id": "adventurers",
+                "item_name": "Validation Rope",
+                "quantity": 1,
+            },
+            expect_ok=False,
+        )
+        self.assertEqual(bad_party_owner["error"], "invalid_party_owner_id")
+
+        bad_reward = run_dmctl(
+            "reward",
+            "grant",
+            "--campaign",
+            self.campaign_id,
+            payload={
+                "recipient_type": "npc",
+                "recipient_id": "npc_missing",
+                "reward": {"hooks_add": ["probe"]},
+            },
+            expect_ok=False,
+        )
+        self.assertEqual(bad_reward["error"], "reward_recipient_not_found")
+
+    def test_validate_detects_orphan_relationship_inventory_and_reward_references(self):
+        db_path = CAMPAIGNS_ROOT / self.campaign_id / "campaign.db"
+        conn = sqlite3.connect(db_path)
+        ts = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+        item_id = f"item_{uuid.uuid4().hex[:8]}"
+        conn.execute(
+            """
+            INSERT INTO items (
+                id, campaign_id, name, description, stackable, consumable, max_charges, charges, created_at, updated_at
+            ) VALUES (?, ?, ?, '', 1, 0, 0, 0, ?, ?)
+            """,
+            (item_id, self.campaign_id, "Orphan Probe Item", ts, ts),
+        )
+        conn.execute(
+            """
+            INSERT INTO inventories (campaign_id, owner_type, owner_id, item_id, quantity, updated_at)
+            VALUES (?, 'pc', 'pc_missing', ?, 1, ?)
+            """,
+            (self.campaign_id, item_id, ts),
+        )
+        conn.execute(
+            """
+            INSERT INTO relationships (
+                id, campaign_id, source_type, source_id, target_type, target_id, trust, fear, debt, reputation, updated_at
+            ) VALUES (?, ?, 'pc', 'pc_missing', 'npc', 'npc_missing', 0, 0, 0, 0, ?)
+            """,
+            (f"rel_{uuid.uuid4().hex[:8]}", self.campaign_id, ts),
+        )
+        conn.execute(
+            """
+            INSERT INTO reward_events (
+                id, campaign_id, turn_id, source_type, source_id, recipient_type, recipient_id, reward_json, created_at
+            ) VALUES (?, ?, NULL, 'manual', '', 'npc', 'npc_missing', '{}', ?)
+            """,
+            (f"reward_{uuid.uuid4().hex[:8]}", self.campaign_id, ts),
+        )
+        conn.commit()
+        conn.close()
+
+        validate = run_dmctl("validate", "--campaign", self.campaign_id, expect_ok=False)
+        self.assertEqual(validate["error"], "validation_failed")
+        result = validate["details"]["results"][0]
+        errors = " ".join(result["errors"])
+        self.assertIn("orphan relationship endpoints found", errors)
+        self.assertIn("invalid inventory owners found", errors)
+        self.assertIn("invalid reward recipients found", errors)
 
 
 if __name__ == "__main__":
