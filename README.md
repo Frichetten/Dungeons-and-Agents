@@ -59,6 +59,20 @@ All commands return JSON only.
 python3 -m unittest discover -s tests -v
 ```
 
+## Self-Play QA Run
+
+Run a deterministic persisted campaign simulation (50 committed turns by default):
+
+```bash
+python3 tools/dm/selfplay_50_turn.py
+```
+
+Optional flags:
+
+```bash
+python3 tools/dm/selfplay_50_turn.py --campaign qa_selfplay --turns 50
+```
+
 ## Agent Instruction Layout
 
 - Engineering/default agent instructions: `AGENTS.md`

@@ -198,6 +198,52 @@ class TestDMCTLReliabilityV2(unittest.TestCase):
         names = {row["item_name"] for row in state["data"]["inventory"]}
         self.assertNotIn(marker_name, names)
 
+    def test_03_campaign_load_and_turn_numbers_anchor_to_latest_committed(self):
+        baseline_load = run_dmctl("campaign", "load", "--campaign", self.campaign_id)
+        baseline_turn_number = baseline_load["data"]["latest_turn"]["turn_number"]
+
+        run_dmctl("turn", "begin", "--campaign", self.campaign_id)
+        run_dmctl(
+            "world",
+            "pulse",
+            "--campaign",
+            self.campaign_id,
+            payload={"hours": 1, "add_hooks": ["rollback-turn-number-probe"]},
+        )
+        run_dmctl("turn", "rollback", "--campaign", self.campaign_id, payload={"reason": "Turn numbering probe"})
+
+        load_after_rollback = run_dmctl("campaign", "load", "--campaign", self.campaign_id)
+        self.assertEqual(load_after_rollback["data"]["latest_turn"]["status"], "committed")
+        self.assertEqual(load_after_rollback["data"]["latest_turn"]["turn_number"], baseline_turn_number)
+        self.assertEqual(load_after_rollback["data"]["latest_turn_any"]["status"], "rolled_back")
+        self.assertLess(load_after_rollback["data"]["latest_turn_any"]["turn_number"], 0)
+
+        retry_begin = run_dmctl("turn", "begin", "--campaign", self.campaign_id)
+        self.assertEqual(retry_begin["data"]["turn"]["turn_number"], baseline_turn_number + 1)
+        run_dmctl(
+            "world",
+            "pulse",
+            "--campaign",
+            self.campaign_id,
+            payload={"hours": 1, "add_hooks": ["retry-turn-number-probe"]},
+        )
+        run_dmctl("turn", "commit", "--campaign", self.campaign_id, "--summary", "Turn numbering probe commit")
+
+        conn = sqlite3.connect(self._campaign_db())
+        committed_rows = conn.execute(
+            "SELECT status FROM turns WHERE campaign_id = ? AND turn_number = ? ORDER BY id",
+            (self.campaign_id, baseline_turn_number + 1),
+        ).fetchall()
+        rolled_back_rows = conn.execute(
+            "SELECT turn_number FROM turns WHERE campaign_id = ? AND status = 'rolled_back' ORDER BY id",
+            (self.campaign_id,),
+        ).fetchall()
+        conn.close()
+        statuses = [row[0] for row in committed_rows]
+        self.assertEqual(statuses, ["committed"])
+        self.assertGreaterEqual(len(rolled_back_rows), 1)
+        self.assertTrue(all(int(row[0]) < 0 for row in rolled_back_rows))
+
     def test_03_seed_requires_minimum_npcs(self):
         campaign_id = f"seed_{uuid.uuid4().hex[:8]}"
         try:

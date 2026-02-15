@@ -555,6 +555,25 @@ def get_open_turn(conn: sqlite3.Connection, campaign_id: str) -> Optional[sqlite
     ).fetchone()
 
 
+def get_latest_turn(
+    conn: sqlite3.Connection,
+    campaign_id: str,
+    *,
+    status: Optional[str] = None,
+) -> Optional[sqlite3.Row]:
+    query = "SELECT * FROM turns WHERE campaign_id = ?"
+    params: List[Any] = [campaign_id]
+    if status:
+        query += " AND status = ?"
+        params.append(status)
+    query += " ORDER BY id DESC LIMIT 1"
+    return conn.execute(query, tuple(params)).fetchone()
+
+
+def get_latest_committed_turn(conn: sqlite3.Connection, campaign_id: str) -> Optional[sqlite3.Row]:
+    return get_latest_turn(conn, campaign_id, status="committed")
+
+
 def require_open_turn(conn: sqlite3.Connection, campaign_id: str) -> sqlite3.Row:
     turn = get_open_turn(conn, campaign_id)
     if turn is None:
@@ -1135,14 +1154,8 @@ def snapshot_from_db(conn: sqlite3.Connection, campaign_id: str) -> Dict[str, An
         (campaign_id,),
     ).fetchone()
 
-    latest_turn = conn.execute(
-        """
-        SELECT id, turn_number, status, started_at, ended_at, summary
-        FROM turns WHERE campaign_id = ?
-        ORDER BY id DESC LIMIT 1
-        """,
-        (campaign_id,),
-    ).fetchone()
+    latest_turn_any = get_latest_turn(conn, campaign_id)
+    latest_turn = get_latest_committed_turn(conn, campaign_id) or latest_turn_any
 
     open_turn = get_open_turn(conn, campaign_id)
     players = to_jsonable(
@@ -1176,6 +1189,7 @@ def snapshot_from_db(conn: sqlite3.Connection, campaign_id: str) -> Dict[str, An
         "campaign": as_dict(campaign),
         "world_state": as_dict(world),
         "latest_turn": as_dict(latest_turn),
+        "latest_turn_any": as_dict(latest_turn_any),
         "open_turn": as_dict(open_turn),
         "counts": {
             "players": len(players),
@@ -2612,10 +2626,8 @@ def command_campaign_load(args: argparse.Namespace, _payload: Dict[str, Any]) ->
         raise DMError("campaign_not_found", {"campaign": campaign_id})
 
     open_turn = get_open_turn(conn, campaign_id)
-    latest_turn = conn.execute(
-        "SELECT * FROM turns WHERE campaign_id = ? ORDER BY id DESC LIMIT 1",
-        (campaign_id,),
-    ).fetchone()
+    latest_turn_any = get_latest_turn(conn, campaign_id)
+    latest_turn = get_latest_committed_turn(conn, campaign_id) or latest_turn_any
 
     world_state = conn.execute(
         """
@@ -2653,6 +2665,7 @@ def command_campaign_load(args: argparse.Namespace, _payload: Dict[str, Any]) ->
             "world_state": as_dict(world_state),
             "open_turn": as_dict(open_turn),
             "latest_turn": as_dict(latest_turn),
+            "latest_turn_any": as_dict(latest_turn_any),
             "counts": as_dict(counts),
             "continuity": continuity,
             "continuity_summary": continuity_summary,
@@ -3323,13 +3336,14 @@ def command_turn_rollback(args: argparse.Namespace, payload: Dict[str, Any]) -> 
 
     conn2 = connect_campaign_db(campaign_id)
     rollback_ts = now_iso()
+    archived_turn_number = -turn_id
     conn2.execute(
         """
         UPDATE turns
-        SET status = 'rolled_back', ended_at = ?, summary = ?
+        SET status = 'rolled_back', turn_number = ?, ended_at = ?, summary = ?
         WHERE id = ?
         """,
-        (rollback_ts, reason, turn_id),
+        (archived_turn_number, rollback_ts, reason, turn_id),
     )
     discarded = discard_staged_events(conn2, campaign_id, turn_id)
     discarded += insert_captured_events(
@@ -3345,7 +3359,12 @@ def command_turn_rollback(args: argparse.Namespace, payload: Dict[str, Any]) -> 
         campaign_id,
         turn_id,
         "turn rollback",
-        {"turn_id": turn_id, "reason": reason, "discarded_events": discarded},
+        {
+            "turn_id": turn_id,
+            "reason": reason,
+            "discarded_events": discarded,
+            "archived_turn_number": archived_turn_number,
+        },
     )
     set_campaign_last_played(conn2, campaign_id)
     snapshot = write_snapshot(conn2, campaign_id)
@@ -3363,7 +3382,13 @@ def command_turn_rollback(args: argparse.Namespace, payload: Dict[str, Any]) -> 
 
     response_data: Dict[str, Any] = {
         "campaign": campaign_id,
-        "turn": {"id": turn_id, "status": "rolled_back", "reason": reason, "discarded_events": discarded},
+        "turn": {
+            "id": turn_id,
+            "status": "rolled_back",
+            "reason": reason,
+            "discarded_events": discarded,
+            "archived_turn_number": archived_turn_number,
+        },
         "snapshot_ref": snapshot_reference(campaign_id, snapshot),
     }
     if full_response:
@@ -6839,7 +6864,7 @@ def command_ooc(args: argparse.Namespace, payload: Dict[str, Any]) -> Tuple[Dict
             """
             SELECT * FROM turns
             WHERE campaign_id = ? AND status = 'committed'
-            ORDER BY turn_number DESC
+            ORDER BY turn_number DESC, id DESC
             LIMIT 1
             """,
             (campaign_id,),
@@ -6882,13 +6907,14 @@ def command_ooc(args: argparse.Namespace, payload: Dict[str, Any]) -> Tuple[Dict
         restore_database_from_file(checkpoint_path, campaign_db_path(campaign_id))
         conn2 = connect_campaign_db(campaign_id)
         rollback_ts = now_iso()
+        archived_turn_number = -turn_id
         conn2.execute(
             """
             UPDATE turns
-            SET status = 'rolled_back', ended_at = ?, summary = ?
+            SET status = 'rolled_back', turn_number = ?, ended_at = ?, summary = ?
             WHERE id = ?
             """,
-            (rollback_ts, reason, turn_id),
+            (archived_turn_number, rollback_ts, reason, turn_id),
         )
         discarded = discard_staged_events(conn2, campaign_id, turn_id)
         restored_committed = insert_captured_events(
@@ -6911,6 +6937,7 @@ def command_ooc(args: argparse.Namespace, payload: Dict[str, Any]) -> Tuple[Dict
                 "reason": reason,
                 "discarded_events": discarded,
                 "restored_committed_events": restored_committed,
+                "archived_turn_number": archived_turn_number,
                 "undo_mode": "committed_turn",
             },
         )
@@ -6933,6 +6960,7 @@ def command_ooc(args: argparse.Namespace, payload: Dict[str, Any]) -> Tuple[Dict
                     "reason": reason,
                     "discarded_events": discarded,
                     "mode": "committed",
+                    "archived_turn_number": archived_turn_number,
                 },
                 "restored_committed_events": restored_committed,
                 "snapshot_ref": snapshot_reference(campaign_id, snapshot),
@@ -7997,7 +8025,7 @@ def command_recap_generate(args: argparse.Namespace, payload: Dict[str, Any]) ->
             SELECT turn_number, summary, started_at, ended_at
             FROM turns
             WHERE campaign_id = ? AND status = 'committed'
-            ORDER BY turn_number DESC
+            ORDER BY turn_number DESC, id DESC
             LIMIT ?
             """,
             (campaign_id, limit),
