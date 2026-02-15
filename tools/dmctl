@@ -6056,7 +6056,13 @@ def command_ooc_refresh(args: argparse.Namespace, payload: Dict[str, Any]) -> Tu
 
     if mode_requested in {"auto", "compact"}:
         compact_state_data, compact_state_warnings = command_state_get(
-            clone_args(args, path=",".join(state_paths), include_hidden=include_hidden, full=False),
+            clone_args(
+                args,
+                path=",".join(state_paths),
+                include_hidden=include_hidden,
+                profile=profile,
+                full=False,
+            ),
             {"profile": profile},
         )
         warnings.extend(compact_state_warnings)
@@ -6121,7 +6127,13 @@ def command_ooc_refresh(args: argparse.Namespace, payload: Dict[str, Any]) -> Tu
     full_state_snapshot: Dict[str, Any] = {}
     if full_mode:
         full_state_snapshot, full_state_warnings = command_state_get(
-            clone_args(args, path=None, include_hidden=include_hidden, full=True),
+            clone_args(
+                args,
+                path=None,
+                include_hidden=include_hidden,
+                profile=profile,
+                full=True,
+            ),
             {"profile": profile, "full": True},
         )
         warnings.extend(full_state_warnings)

@@ -517,6 +517,22 @@ class TestDMCTLFeaturesV2(unittest.TestCase):
         self.assertEqual(refresh_turn_numbers, sorted(refresh_turn_numbers, reverse=True))
         self.assertEqual(refresh_turn_numbers, recap_turn_numbers)
 
+    def test_10_refresh_respects_payload_include_hidden_over_cli_profile(self):
+        refresh = run_dmctl(
+            "ooc",
+            "refresh",
+            "--campaign",
+            self.campaign_id,
+            "--profile",
+            "dm_full",
+            payload={"include_hidden": False, "mode": "full"},
+        )
+        snapshot = refresh["data"]["memory_packet"]["state_snapshot"]
+        self.assertEqual(snapshot["profile"], "dm_public")
+        self.assertNotIn("notes_hidden", snapshot)
+        for npc in snapshot.get("npcs", []):
+            self.assertNotIn("notes_hidden", npc)
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
