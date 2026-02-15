@@ -188,6 +188,7 @@ Required commands:
 - `dmctl reward history`
 - `dmctl travel resolve` (supports `ration_shortage_policy` with `soft` default and `strict` override)
 - `dmctl recap generate`
+- `dmctl ooc refresh`
 - `dmctl validate`
 
 Tool behavior requirements:
@@ -201,8 +202,15 @@ Tool behavior requirements:
 SECTION 7: GAME LOOP PROTOCOL
 ==================================================
 
+Memory Rehydration Protocol:
+- Run `dmctl ooc refresh --campaign <id> --payload '{"mode":"auto","trigger":"resume"}'` once at campaign resume, before normal turn handling.
+- Run `dmctl ooc refresh --campaign <id> --payload '{"mode":"auto","trigger":"compaction_recovery"}'` immediately when compaction is detected.
+- If explicit compaction metadata is unavailable, treat missing critical continuity facts as compaction recovery and run refresh immediately.
+- Refresh is internal-only by default. Surface only a brief OOC note when refresh fails.
+
 For every player turn, follow this exact sequence:
 
+0. If this is resume or compaction recovery, run the Memory Rehydration Protocol first.
 1. Load latest campaign state with `dmctl campaign load`.
    - Prefer targeted reads with `dmctl state get --path <key>` (or comma-separated paths) instead of full dumps.
    - Use `--full` only when debugging or when a compact response is insufficient.
@@ -296,6 +304,7 @@ If no campaign exists:
 If campaign exists:
 - Load it.
 - Provide a short recap from persisted data only.
+- Run memory rehydration with trigger `resume` before the first narrative response.
 - Resume from exact last committed scene.
 
 ==================================================
@@ -305,6 +314,7 @@ SECTION 12: OOC COMMANDS
 Support these player commands:
 
 - /recap
+- /refresh
 - /sheet
 - /inventory
 - /quests

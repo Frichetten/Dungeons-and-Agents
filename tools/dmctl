@@ -53,6 +53,18 @@ BACKUPS_ROOT = DM_ROOT / "backups"
 SCHEMA_PATH = ROOT / "tools" / "dm" / "schema.sql"
 MIGRATIONS_ROOT = ROOT / "tools" / "dm" / "migrations"
 
+DEFAULT_REFRESH_STATE_PATHS = (
+    "world_state",
+    "players",
+    "quests",
+    "clocks",
+    "relationships",
+    "active_encounter",
+    "open_turn",
+)
+REFRESH_MODES = {"auto", "compact", "full"}
+REFRESH_TRIGGERS = {"manual", "resume", "compaction_recovery"}
+
 
 class DMError(Exception):
     def __init__(self, message: str, details: Optional[Dict[str, Any]] = None):
@@ -548,6 +560,37 @@ def safe_int(value: Any, field: str) -> int:
         return int(value)
     except (TypeError, ValueError) as exc:
         raise DMError("invalid_integer", {"field": field, "value": value}) from exc
+
+
+def safe_bool(value: Any, field: str, default: Optional[bool] = None) -> bool:
+    if value is None:
+        if default is not None:
+            return default
+        raise DMError("invalid_boolean", {"field": field, "value": value})
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, int):
+        return value != 0
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in {"1", "true", "yes", "y", "on"}:
+            return True
+        if normalized in {"0", "false", "no", "n", "off"}:
+            return False
+    raise DMError("invalid_boolean", {"field": field, "value": value})
+
+
+def clone_args(args: argparse.Namespace, **overrides: Any) -> argparse.Namespace:
+    cloned = dict(vars(args))
+    cloned.update(overrides)
+    return argparse.Namespace(**cloned)
+
+
+def strip_ui_fields(data: Dict[str, Any]) -> Dict[str, Any]:
+    clean = dict(data)
+    clean.pop("ui", None)
+    clean.pop("ui_markdown", None)
+    return clean
 
 
 def sqlite_table_exists(conn: sqlite3.Connection, table_name: str) -> bool:
@@ -6075,6 +6118,277 @@ def fetch_next_payoff_hooks(conn: sqlite3.Connection, campaign_id: str, *, limit
     return seen[: max(1, limit)]
 
 
+def parse_refresh_mode(value: Any) -> str:
+    mode = str(value or "auto").strip().lower()
+    if mode not in REFRESH_MODES:
+        raise DMError("invalid_refresh_mode", {"mode": mode, "allowed": sorted(REFRESH_MODES)})
+    return mode
+
+
+def parse_refresh_trigger(value: Any) -> str:
+    trigger = str(value or "manual").strip().lower()
+    if trigger not in REFRESH_TRIGGERS:
+        raise DMError("invalid_refresh_trigger", {"trigger": trigger, "allowed": sorted(REFRESH_TRIGGERS)})
+    return trigger
+
+
+def parse_refresh_state_paths(value: Any) -> List[str]:
+    if value is None:
+        return list(DEFAULT_REFRESH_STATE_PATHS)
+    if isinstance(value, str):
+        parts = [part.strip() for part in value.split(",") if part.strip()]
+        if not parts:
+            raise DMError("invalid_refresh_state_paths", {"state_paths": value})
+        return parts
+    if isinstance(value, list):
+        parts = [str(part).strip() for part in value if str(part).strip()]
+        if not parts:
+            raise DMError("invalid_refresh_state_paths", {"state_paths": value})
+        return parts
+    raise DMError("invalid_refresh_state_paths", {"state_paths": value})
+
+
+def normalize_state_path_response(data: Dict[str, Any]) -> Dict[str, Any]:
+    if isinstance(data.get("values"), dict):
+        return dict(data["values"])
+    if data.get("path"):
+        return {str(data.get("path")): data.get("value")}
+    return {}
+
+
+def build_player_status(rows: Any) -> List[Dict[str, Any]]:
+    if not isinstance(rows, list):
+        return []
+    status_rows: List[Dict[str, Any]] = []
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        status_rows.append(
+            select_keys(
+                row,
+                (
+                    "id",
+                    "name",
+                    "level",
+                    "current_hp",
+                    "max_hp",
+                    "ac",
+                    "exhaustion",
+                    "conditions_json",
+                    "concentration_spell",
+                    "location_id",
+                    "location_name",
+                    "money_cp",
+                ),
+            )
+        )
+    return status_rows
+
+
+def build_active_quests(rows: Any) -> List[Dict[str, Any]]:
+    if not isinstance(rows, list):
+        return []
+    active: List[Dict[str, Any]] = []
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        status = str(row.get("status", "")).lower()
+        if status == "completed":
+            continue
+        active.append(select_keys(row, ("id", "title", "status", "updated_at")))
+    return active[:10]
+
+
+def build_active_clocks(rows: Any) -> List[Dict[str, Any]]:
+    if not isinstance(rows, list):
+        return []
+    active: List[Dict[str, Any]] = []
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        status = str(row.get("status", "active")).lower()
+        if status != "active":
+            continue
+        active.append(select_keys(row, ("id", "name", "current_segments", "max_segments", "status", "updated_at")))
+    return active[:10]
+
+
+def command_ooc_refresh(args: argparse.Namespace, payload: Dict[str, Any]) -> Tuple[Dict[str, Any], List[str]]:
+    campaign_id = require_campaign(args.campaign)
+    mode_requested = parse_refresh_mode(payload.get("mode", "auto"))
+    trigger = parse_refresh_trigger(payload.get("trigger", "manual"))
+    turn_limit = max(1, safe_int(payload.get("turn_limit", 8), "turn_limit"))
+    rewards_limit = max(1, safe_int(payload.get("rewards_limit", 8), "rewards_limit"))
+    hooks_limit = max(1, safe_int(payload.get("hooks_limit", 10), "hooks_limit"))
+    state_paths = parse_refresh_state_paths(payload.get("state_paths"))
+    include_hidden = safe_bool(payload.get("include_hidden"), "include_hidden", default=True)
+    profile = "dm_full" if include_hidden else "dm_public"
+
+    warnings: List[str] = []
+    load_data, load_warnings = command_campaign_load(clone_args(args), {})
+    warnings.extend(load_warnings)
+
+    compact_state_values: Dict[str, Any] = {}
+    critical_missing_paths: List[str] = []
+    critical_missing_fields: List[str] = []
+    active_combat = False
+
+    if mode_requested in {"auto", "compact"}:
+        compact_state_data, compact_state_warnings = command_state_get(
+            clone_args(
+                args,
+                path=",".join(state_paths),
+                include_hidden=include_hidden,
+                profile=profile,
+                full=False,
+            ),
+            {"profile": profile},
+        )
+        warnings.extend(compact_state_warnings)
+        compact_state_values = normalize_state_path_response(compact_state_data)
+
+        for key in DEFAULT_REFRESH_STATE_PATHS:
+            if key not in compact_state_values:
+                critical_missing_paths.append(key)
+
+        world_state = compact_state_values.get("world_state")
+        if not isinstance(world_state, dict):
+            critical_missing_fields.append("world_state")
+        else:
+            for required_field in ("world_date", "world_time", "region"):
+                if not world_state.get(required_field):
+                    critical_missing_fields.append(f"world_state.{required_field}")
+
+        encounter = compact_state_values.get("active_encounter")
+        active_combat = isinstance(encounter, dict) and bool(encounter.get("id"))
+
+    mode_used = mode_requested
+    continuity_summary = load_data.get("continuity_summary", {})
+    continuity_errors = safe_int(continuity_summary.get("error_count", 0), "continuity_summary.error_count")
+    auto_escalation_reasons: List[str] = []
+    if mode_requested == "auto":
+        if continuity_errors > 0:
+            auto_escalation_reasons.append("continuity_errors")
+        if active_combat:
+            auto_escalation_reasons.append("active_combat")
+        if critical_missing_paths:
+            auto_escalation_reasons.append("missing_critical_paths")
+        if critical_missing_fields:
+            auto_escalation_reasons.append("missing_critical_fields")
+        if auto_escalation_reasons:
+            mode_used = "full"
+            warnings.append("refresh_auto_escalated_to_full")
+        else:
+            mode_used = "compact"
+
+    full_mode = mode_used == "full"
+
+    dashboard_payload: Dict[str, Any] = {"rewards_limit": rewards_limit, "hooks_limit": hooks_limit}
+    if full_mode:
+        dashboard_payload["full"] = True
+    dashboard_data_raw, dashboard_warnings = command_ooc(
+        clone_args(args, action="dashboard", full=full_mode),
+        dashboard_payload,
+    )
+    warnings.extend(dashboard_warnings)
+    dashboard_data = strip_ui_fields(dashboard_data_raw)
+
+    recap_payload: Dict[str, Any] = {"limit": turn_limit, "rewards_limit": rewards_limit, "hooks_limit": hooks_limit}
+    if full_mode:
+        recap_payload["full"] = True
+    recap_data_raw, recap_warnings = command_recap_generate(
+        clone_args(args, full=full_mode),
+        recap_payload,
+    )
+    warnings.extend(recap_warnings)
+    recap_data = strip_ui_fields(recap_data_raw)
+
+    full_state_snapshot: Dict[str, Any] = {}
+    if full_mode:
+        full_state_snapshot, full_state_warnings = command_state_get(
+            clone_args(
+                args,
+                path=None,
+                include_hidden=include_hidden,
+                profile=profile,
+                full=True,
+            ),
+            {"profile": profile, "full": True},
+        )
+        warnings.extend(full_state_warnings)
+        state_slices = {path: full_state_snapshot.get(path) for path in state_paths if path in full_state_snapshot}
+    else:
+        state_slices = dict(compact_state_values)
+
+    if full_mode:
+        for path in state_paths:
+            if path not in state_slices:
+                warnings.append(f"refresh_state_path_missing:{path}")
+
+    world_state_data = state_slices.get("world_state")
+    if not isinstance(world_state_data, dict):
+        world_state_data = load_data.get("world_state", {})
+
+    open_turn_data = state_slices.get("open_turn")
+    if not isinstance(open_turn_data, dict) or not open_turn_data:
+        open_turn_data = dashboard_data.get("open_turn", load_data.get("open_turn", {}))
+
+    encounter_data = state_slices.get("active_encounter")
+    if not isinstance(encounter_data, dict) or not encounter_data:
+        encounter_data = dashboard_data.get("active_encounter", {})
+
+    players = state_slices.get("players")
+    quests = state_slices.get("quests")
+    clocks = state_slices.get("clocks")
+    relationships = state_slices.get("relationships")
+
+    active_quests = build_active_quests(quests)
+    if not active_quests:
+        active_quests = build_active_quests(recap_data.get("open_quests"))
+
+    active_clocks = build_active_clocks(clocks)
+    if not active_clocks:
+        active_clocks = build_active_clocks(recap_data.get("active_clocks"))
+
+    memory_packet: Dict[str, Any] = {
+        "world_state": world_state_data,
+        "open_turn": open_turn_data,
+        "active_encounter": encounter_data,
+        "player_status": build_player_status(players),
+        "active_quests": active_quests,
+        "active_clocks": active_clocks,
+        "relationships": relationships if isinstance(relationships, list) else [],
+        "recent_rewards": dashboard_data.get("recent_rewards", recap_data.get("recent_rewards", [])),
+        "active_pressures": dashboard_data.get("active_pressures", recap_data.get("active_pressures", {})),
+        "next_payoff_hooks": dashboard_data.get("next_payoff_hooks", recap_data.get("next_payoff_hooks", [])),
+        "recent_turn_diffs": recap_data.get("recent_turn_diffs", []),
+        "recent_turn_diffs_mode": recap_data.get("recent_turn_diffs_mode", "full" if full_mode else "summary"),
+        "latest_turn": load_data.get("latest_turn", {}),
+        "latest_turn_diff": dashboard_data.get("latest_turn_diff", {}),
+        "state_paths": state_paths,
+        "state_slices": state_slices,
+    }
+    if full_mode:
+        memory_packet["state_snapshot"] = full_state_snapshot
+    if critical_missing_paths:
+        memory_packet["critical_missing_paths"] = critical_missing_paths
+    if critical_missing_fields:
+        memory_packet["critical_missing_fields"] = critical_missing_fields
+    if auto_escalation_reasons:
+        memory_packet["auto_escalation_reasons"] = auto_escalation_reasons
+
+    refresh_data = {
+        "campaign": campaign_id,
+        "trigger": trigger,
+        "mode_requested": mode_requested,
+        "mode_used": mode_used,
+        "continuity_summary": continuity_summary,
+        "memory_packet": memory_packet,
+        "warnings": warnings,
+    }
+    return (refresh_data, warnings)
+
+
 def command_ooc(args: argparse.Namespace, payload: Dict[str, Any]) -> Tuple[Dict[str, Any], List[str]]:
     campaign_id = require_campaign(args.campaign)
     action = args.action
@@ -6084,6 +6398,10 @@ def command_ooc(args: argparse.Namespace, payload: Dict[str, Any]) -> Tuple[Dict
 
     if action == "recap":
         return command_recap_generate(args, payload)
+
+    if action == "refresh":
+        data, warnings = command_ooc_refresh(args, payload)
+        return ooc_response(data, warnings)
 
     if action == "state":
         if "profile" not in payload:
@@ -7523,6 +7841,7 @@ def command_map() -> Dict[Tuple[str, str], Any]:
         ("ooc", "time"): command_ooc,
         ("ooc", "map"): command_ooc,
         ("ooc", "state"): command_ooc,
+        ("ooc", "refresh"): command_ooc,
         ("ooc", "savepoint"): command_ooc,
         ("ooc", "undo_last_turn"): command_ooc,
         ("ooc", "dashboard"): command_ooc,
@@ -7702,6 +8021,10 @@ def error_hint(error: str) -> Optional[str]:
         "invalid_objective_status": "Use objective status: open, complete, or failed.",
         "item_id_name_conflict": "Use the existing item_id for that item name, or choose a unique item_name.",
         "objective_id_conflict": "Use a unique objective id or update the objective on its original quest.",
+        "invalid_boolean": "Use true/false (or 1/0) for boolean payload fields.",
+        "invalid_refresh_mode": "Use refresh mode: auto, compact, or full.",
+        "invalid_refresh_trigger": "Use refresh trigger: manual, resume, or compaction_recovery.",
+        "invalid_refresh_state_paths": "Pass state_paths as a non-empty comma-separated string or array.",
     }
     return hints.get(error)
 
@@ -7719,6 +8042,10 @@ def error_message(error: str) -> str:
         "invalid_objective_status": "Quest objective status value is invalid.",
         "item_id_name_conflict": "The provided item_id conflicts with an existing item_name.",
         "objective_id_conflict": "The objective ID is already assigned to a different quest.",
+        "invalid_boolean": "A boolean payload value is invalid.",
+        "invalid_refresh_mode": "Refresh mode value is invalid.",
+        "invalid_refresh_trigger": "Refresh trigger value is invalid.",
+        "invalid_refresh_state_paths": "Refresh state_paths value is invalid.",
     }
     return mapping.get(error, error.replace("_", " "))
 

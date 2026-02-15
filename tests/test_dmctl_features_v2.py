@@ -335,6 +335,9 @@ class TestDMCTLFeaturesV2(unittest.TestCase):
         self.assertTrue(prefixed_body["ok"])
         self.assertEqual(prefixed_body["data"]["requested_group"], "campaign")
 
+        ooc_help = run_dmctl("ooc", "--help")
+        self.assertIn("refresh", ooc_help["data"]["requested_actions"])
+
     def test_05_ooc_undo_last_committed_turn(self):
         marker = f"CommittedUndo-{uuid.uuid4().hex[:6]}"
         run_dmctl("turn", "begin", "--campaign", self.campaign_id)
@@ -425,6 +428,113 @@ class TestDMCTLFeaturesV2(unittest.TestCase):
         self.assertGreaterEqual(len(turn_numbers), 1)
         self.assertEqual(turn_numbers[0], latest_turn_number)
         self.assertEqual(turn_numbers, sorted(turn_numbers, reverse=True))
+
+    def test_07_ooc_refresh_contract_and_modes(self):
+        for idx in range(2):
+            run_dmctl("turn", "begin", "--campaign", self.campaign_id)
+            run_dmctl(
+                "world",
+                "pulse",
+                "--campaign",
+                self.campaign_id,
+                payload={"hours": 0, "add_hooks": [f"refresh_contract_hook_{idx}"]},
+            )
+            run_dmctl("turn", "commit", "--campaign", self.campaign_id, "--summary", f"Refresh contract turn {idx}")
+
+        refresh = run_dmctl("ooc", "refresh", "--campaign", self.campaign_id)
+        self.assertEqual(refresh["command"], "ooc refresh")
+        for key in ("campaign", "trigger", "mode_requested", "mode_used", "continuity_summary", "memory_packet", "warnings"):
+            self.assertIn(key, refresh["data"])
+        self.assertEqual(refresh["data"]["trigger"], "manual")
+        self.assertEqual(refresh["data"]["mode_requested"], "auto")
+        self.assertEqual(refresh["data"]["mode_used"], "compact")
+        self.assertIn("ui", refresh["data"])
+        self.assertEqual(refresh["data"]["ui"]["template_id"], "ooc_panel")
+
+        packet = refresh["data"]["memory_packet"]
+        self.assertIn("world_state", packet)
+        self.assertIn("player_status", packet)
+        self.assertIn("recent_turn_diffs", packet)
+        self.assertIn("state_slices", packet)
+        if packet["recent_turn_diffs"]:
+            self.assertIn("diff_summary", packet["recent_turn_diffs"][0])
+            self.assertNotIn("diff", packet["recent_turn_diffs"][0])
+
+        refresh_full = run_dmctl(
+            "ooc",
+            "refresh",
+            "--campaign",
+            self.campaign_id,
+            payload={"mode": "full", "turn_limit": 3},
+        )
+        self.assertEqual(refresh_full["data"]["mode_requested"], "full")
+        self.assertEqual(refresh_full["data"]["mode_used"], "full")
+        full_packet = refresh_full["data"]["memory_packet"]
+        self.assertIn("state_snapshot", full_packet)
+        if full_packet["recent_turn_diffs"]:
+            self.assertIn("diff", full_packet["recent_turn_diffs"][0])
+
+    def test_08_ooc_refresh_auto_escalates_when_critical_context_missing(self):
+        refresh = run_dmctl(
+            "ooc",
+            "refresh",
+            "--campaign",
+            self.campaign_id,
+            payload={"mode": "auto", "state_paths": "world_state"},
+        )
+        self.assertEqual(refresh["data"]["mode_requested"], "auto")
+        self.assertEqual(refresh["data"]["mode_used"], "full")
+        self.assertIn("refresh_auto_escalated_to_full", refresh["data"]["warnings"])
+        packet = refresh["data"]["memory_packet"]
+        self.assertIn("critical_missing_paths", packet)
+        self.assertIn("state_snapshot", packet)
+
+    def test_09_refresh_recent_turn_diffs_use_latest_turn_order(self):
+        for idx in range(2):
+            run_dmctl("turn", "begin", "--campaign", self.campaign_id)
+            run_dmctl(
+                "world",
+                "pulse",
+                "--campaign",
+                self.campaign_id,
+                payload={"hours": 0, "add_hooks": [f"refresh_order_hook_{idx}"]},
+            )
+            run_dmctl("turn", "commit", "--campaign", self.campaign_id, "--summary", f"Refresh order turn {idx}")
+
+        dashboard = run_dmctl("ooc", "dashboard", "--campaign", self.campaign_id)
+        latest_turn_number = dashboard["data"]["latest_turn_diff"]["turn_number"]
+
+        recap = run_dmctl("recap", "generate", "--campaign", self.campaign_id, payload={"limit": 3})
+        recap_turn_numbers = [row["turn_number"] for row in recap["data"]["recent_turn_diffs"]]
+
+        refresh = run_dmctl(
+            "ooc",
+            "refresh",
+            "--campaign",
+            self.campaign_id,
+            payload={"mode": "compact", "turn_limit": 3},
+        )
+        refresh_turn_numbers = [row["turn_number"] for row in refresh["data"]["memory_packet"]["recent_turn_diffs"]]
+        self.assertGreaterEqual(len(refresh_turn_numbers), 1)
+        self.assertEqual(refresh_turn_numbers[0], latest_turn_number)
+        self.assertEqual(refresh_turn_numbers, sorted(refresh_turn_numbers, reverse=True))
+        self.assertEqual(refresh_turn_numbers, recap_turn_numbers)
+
+    def test_10_refresh_respects_payload_include_hidden_over_cli_profile(self):
+        refresh = run_dmctl(
+            "ooc",
+            "refresh",
+            "--campaign",
+            self.campaign_id,
+            "--profile",
+            "dm_full",
+            payload={"include_hidden": False, "mode": "full"},
+        )
+        snapshot = refresh["data"]["memory_packet"]["state_snapshot"]
+        self.assertEqual(snapshot["profile"], "dm_public")
+        self.assertNotIn("notes_hidden", snapshot)
+        for npc in snapshot.get("npcs", []):
+            self.assertNotIn("notes_hidden", npc)
 
 
 if __name__ == "__main__":
