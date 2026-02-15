@@ -1234,7 +1234,20 @@ def normalize_hook_entry(entry: Any, *, default_visibility: str = "dm", strict: 
 
 
 def load_unresolved_hooks(raw: Any, *, default_visibility: str = "dm", strict: bool = False) -> List[Dict[str, str]]:
-    parsed = json_load(raw, [])
+    if strict:
+        if raw in (None, ""):
+            parsed = []
+        elif isinstance(raw, list):
+            parsed = raw
+        elif isinstance(raw, str):
+            try:
+                parsed = json.loads(raw)
+            except Exception:
+                raise DMError("invalid_hook_collection", {"hooks": raw, "reason": "invalid_json"})
+        else:
+            parsed = raw
+    else:
+        parsed = json_load(raw, [])
     if not isinstance(parsed, list):
         if strict:
             raise DMError("invalid_hook_collection", {"hooks": raw})

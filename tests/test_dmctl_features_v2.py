@@ -634,6 +634,34 @@ class TestDMCTLFeaturesV2(unittest.TestCase):
             any(row.get("text") == public_hook and row.get("visibility") == "public" for row in hooks)
         )
 
+    def test_15_state_set_rejects_malformed_unresolved_hooks_payload(self):
+        existing_hook = f"existing_hook_{uuid.uuid4().hex[:6]}"
+
+        run_dmctl("turn", "begin", "--campaign", self.campaign_id)
+        run_dmctl(
+            "world",
+            "pulse",
+            "--campaign",
+            self.campaign_id,
+            payload={"hours": 0, "add_hooks": [existing_hook]},
+        )
+        run_dmctl("turn", "commit", "--campaign", self.campaign_id, "--summary", "Establish baseline hook")
+
+        run_dmctl("turn", "begin", "--campaign", self.campaign_id)
+        result = run_dmctl(
+            "state",
+            "set",
+            "--campaign",
+            self.campaign_id,
+            payload={"world_state": {"unresolved_hooks": "not-json"}},
+            expect_ok=False,
+        )
+        self.assertEqual(result["error"], "invalid_hook_collection")
+
+        state = run_dmctl("state", "get", "--campaign", self.campaign_id, "--path", "world_state")
+        hooks = json.loads(state["data"]["value"]["unresolved_hooks_json"])
+        self.assertTrue(any(row.get("text") == existing_hook for row in hooks))
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
