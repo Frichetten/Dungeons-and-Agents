@@ -226,6 +226,28 @@ class TestDMCTLValidationV2(unittest.TestCase):
         self.assertIn("invalid inventory owners found", errors)
         self.assertIn("invalid reward recipients found", errors)
 
+    def test_validate_detects_orphan_active_spell_casters(self):
+        db_path = CAMPAIGNS_ROOT / self.campaign_id / "campaign.db"
+        conn = sqlite3.connect(db_path)
+        ts = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+        conn.execute(
+            """
+            INSERT INTO spells_active (
+                id, campaign_id, caster_type, caster_id, spell_name, target_type, target_id,
+                remaining_rounds, requires_concentration, created_at, updated_at
+            ) VALUES (?, ?, 'pc', 'pc_missing', 'Mage Armor', '', '', 8, 0, ?, ?)
+            """,
+            (f"spell_{uuid.uuid4().hex[:8]}", self.campaign_id, ts, ts),
+        )
+        conn.commit()
+        conn.close()
+
+        validate = run_dmctl("validate", "--campaign", self.campaign_id, expect_ok=False)
+        self.assertEqual(validate["error"], "validation_failed")
+        result = validate["details"]["results"][0]
+        errors = " ".join(result["errors"])
+        self.assertIn("invalid active spell casters found", errors)
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

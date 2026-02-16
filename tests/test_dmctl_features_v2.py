@@ -662,6 +662,137 @@ class TestDMCTLFeaturesV2(unittest.TestCase):
         hooks = json.loads(state["data"]["value"]["unresolved_hooks_json"])
         self.assertTrue(any(row.get("text") == existing_hook for row in hooks))
 
+    def test_16_travel_pc_ids_scope_ration_consumption_and_shortage_effects(self):
+        run_dmctl("turn", "begin", "--campaign", self.campaign_id)
+        run_dmctl(
+            "state",
+            "set",
+            "--campaign",
+            self.campaign_id,
+            payload={
+                "player_characters": [
+                    {
+                        "id": "pc_ally",
+                        "name": "Bryn Vale",
+                        "class": "Fighter",
+                        "level": 2,
+                        "max_hp": 18,
+                        "current_hp": 18,
+                        "ac": 14,
+                        "location_id": "loc_start",
+                    }
+                ]
+            },
+        )
+        run_dmctl(
+            "item",
+            "grant",
+            "--campaign",
+            self.campaign_id,
+            payload={"owner_type": "pc", "owner_id": "pc_hero", "item_name": "Rations", "quantity": 1},
+        )
+
+        travel = run_dmctl(
+            "travel",
+            "resolve",
+            "--campaign",
+            self.campaign_id,
+            payload={
+                "to_location_id": "loc_keep",
+                "travel_hours": 1,
+                "consume_rations": True,
+                "pc_ids": ["pc_hero"],
+                "ration_shortage_policy": "soft",
+            },
+        )
+        self.assertEqual(travel["data"]["traveler_pc_ids"], ["pc_hero"])
+        self.assertEqual(travel["data"]["consumed_rations"], 1)
+        self.assertEqual(travel["data"]["ration_shortages"], 0)
+
+        players = run_dmctl("state", "get", "--campaign", self.campaign_id, "--path", "players")
+        player_rows = {row["id"]: row for row in players["data"]["value"]}
+        self.assertEqual(player_rows["pc_hero"]["location_id"], "loc_keep")
+        self.assertEqual(player_rows["pc_ally"]["location_id"], "loc_start")
+        self.assertEqual(player_rows["pc_ally"]["exhaustion"], 0)
+
+        run_dmctl("turn", "commit", "--campaign", self.campaign_id, "--summary", "Travel pc_ids ration scope")
+
+    def test_17_spell_cast_rejects_missing_casters(self):
+        run_dmctl("turn", "begin", "--campaign", self.campaign_id)
+        missing_pc = run_dmctl(
+            "spell",
+            "cast",
+            "--campaign",
+            self.campaign_id,
+            payload={"caster_type": "pc", "caster_id": "pc_missing", "spell_name": "Shield"},
+            expect_ok=False,
+        )
+        self.assertEqual(missing_pc["error"], "player_not_found")
+
+        missing_npc = run_dmctl(
+            "spell",
+            "cast",
+            "--campaign",
+            self.campaign_id,
+            payload={"caster_type": "npc", "caster_id": "npc_missing", "spell_name": "Shield"},
+            expect_ok=False,
+        )
+        self.assertEqual(missing_npc["error"], "npc_not_found")
+
+        missing_combatant = run_dmctl(
+            "spell",
+            "cast",
+            "--campaign",
+            self.campaign_id,
+            payload={"caster_type": "combatant", "caster_id": "cmb_missing", "spell_name": "Shield"},
+            expect_ok=False,
+        )
+        self.assertEqual(missing_combatant["error"], "combatant_not_found")
+
+        run_dmctl("turn", "commit", "--campaign", self.campaign_id, "--summary", "Missing caster checks")
+
+    def test_18_agenda_clock_tick_skips_completed_clocks(self):
+        agenda_id = "agenda_complete_clock_guard"
+        clock_name = "Complete Clock Guard"
+
+        run_dmctl("turn", "begin", "--campaign", self.campaign_id)
+        run_dmctl(
+            "agenda",
+            "upsert",
+            "--campaign",
+            self.campaign_id,
+            payload={
+                "agenda_id": agenda_id,
+                "name": "Complete Clock Guard",
+                "effect_type": "clock_tick",
+                "cadence_turns": 1,
+                "payload": {"name": clock_name, "amount": 1, "max_segments": 2},
+            },
+        )
+        first_pulse = run_dmctl("world", "pulse", "--campaign", self.campaign_id, payload={"hours": 0})
+        self.assertEqual(first_pulse["data"]["summary"]["agenda_rules_applied"], 1)
+        run_dmctl("turn", "commit", "--campaign", self.campaign_id, "--summary", "Agenda clock step 1")
+
+        run_dmctl("turn", "begin", "--campaign", self.campaign_id)
+        second_pulse = run_dmctl("world", "pulse", "--campaign", self.campaign_id, payload={"hours": 0})
+        self.assertEqual(second_pulse["data"]["summary"]["agenda_rules_applied"], 1)
+        run_dmctl("turn", "commit", "--campaign", self.campaign_id, "--summary", "Agenda clock step 2 complete")
+
+        run_dmctl("turn", "begin", "--campaign", self.campaign_id)
+        third_pulse = run_dmctl("world", "pulse", "--campaign", self.campaign_id, payload={"hours": 0})
+        self.assertEqual(third_pulse["data"]["summary"]["agenda_rules_applied"], 0)
+
+        agenda_rows = run_dmctl("agenda", "list", "--campaign", self.campaign_id, payload={"enabled_only": True})
+        agenda = next(row for row in agenda_rows["data"]["agendas"] if row["id"] == agenda_id)
+        self.assertEqual(agenda["last_applied_turn"], second_pulse["data"]["turn_id"])
+
+        clocks = run_dmctl("state", "get", "--campaign", self.campaign_id, "--path", "clocks")
+        clock = next(row for row in clocks["data"]["value"] if row["name"] == clock_name)
+        self.assertEqual(clock["current_segments"], 2)
+        self.assertEqual(clock["status"], "complete")
+
+        run_dmctl("turn", "commit", "--campaign", self.campaign_id, "--summary", "Agenda clock step 3 no-op")
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

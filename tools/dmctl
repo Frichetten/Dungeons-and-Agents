@@ -2460,6 +2460,30 @@ def validate_campaign_state(campaign_id: str, *, include_event_log_parity: bool 
         if reward_orphans:
             errors.append(f"invalid reward recipients found: {reward_orphans}")
 
+        spell_orphans: Dict[str, int] = {}
+        for caster_type, table_name in (
+            ("pc", "player_characters"),
+            ("npc", "npcs"),
+            ("combatant", "combatants"),
+        ):
+            row = conn.execute(
+                f"""
+                SELECT COUNT(*) AS c
+                FROM spells_active s
+                WHERE s.campaign_id = ? AND s.caster_type = ?
+                  AND NOT EXISTS (
+                    SELECT 1 FROM {table_name} t
+                    WHERE t.campaign_id = s.campaign_id AND t.id = s.caster_id
+                  )
+                """,
+                (campaign_id, caster_type),
+            ).fetchone()
+            count = safe_int(row["c"], "spell_orphan_count") if row else 0
+            if count > 0:
+                spell_orphans[caster_type] = count
+        if spell_orphans:
+            errors.append(f"invalid active spell casters found: {spell_orphans}")
+
         if snap_path.exists():
             try:
                 snap = json.loads(snap_path.read_text(encoding="utf-8"))
@@ -5854,6 +5878,8 @@ def command_world_pulse(args: argparse.Namespace, payload: Dict[str, Any]) -> Tu
                         ),
                     )
                 else:
+                    if str(row["status"]) == "complete":
+                        continue
                     max_segments = safe_int(row["max_segments"], "max_segments")
                     current = min(max_segments, safe_int(row["current_segments"], "current_segments") + tick_amount)
                     status = "complete" if current >= max_segments else str(row["status"])
@@ -6148,20 +6174,54 @@ def command_travel_resolve(args: argparse.Namespace, payload: Dict[str, Any]) ->
     if ration_shortage_policy not in {"soft", "strict"}:
         raise DMError("invalid_ration_shortage_policy", {"ration_shortage_policy": ration_shortage_policy})
 
+    raw_pc_ids = payload.get("pc_ids")
+    pc_ids: Optional[List[str]] = None
+    if raw_pc_ids is not None:
+        if not isinstance(raw_pc_ids, list):
+            raise DMError("invalid_travel_pc_ids", {"pc_ids": raw_pc_ids})
+        seen_pc_ids: set[str] = set()
+        normalized_pc_ids: List[str] = []
+        for index, value in enumerate(raw_pc_ids):
+            pc_id = str(value).strip()
+            if not pc_id:
+                raise DMError("invalid_travel_pc_ids", {"pc_ids": raw_pc_ids, "index": index})
+            if pc_id in seen_pc_ids:
+                continue
+            seen_pc_ids.add(pc_id)
+            normalized_pc_ids.append(pc_id)
+        if normalized_pc_ids:
+            pc_ids = normalized_pc_ids
+
     time_advance = advance_world_state_time(conn, campaign_id, hours=travel_hours_int, minutes=0)
     conn.execute(
         "UPDATE world_state SET location_id = ?, updated_at = ? WHERE campaign_id = ?",
         (destination_id, now_iso(), campaign_id),
     )
 
-    pc_ids = payload.get("pc_ids")
+    travelers: List[Dict[str, Any]]
     if pc_ids:
         placeholders = ",".join("?" for _ in pc_ids)
+        travelers = to_jsonable(
+            conn.execute(
+                f"SELECT id, exhaustion FROM player_characters WHERE campaign_id = ? AND id IN ({placeholders})",
+                (campaign_id, *pc_ids),
+            )
+        )
+        found_ids = {str(row["id"]) for row in travelers}
+        missing_pc_ids = [pc_id for pc_id in pc_ids if pc_id not in found_ids]
+        if missing_pc_ids:
+            raise DMError("player_not_found", {"campaign": campaign_id, "pc_ids": missing_pc_ids})
         conn.execute(
             f"UPDATE player_characters SET location_id = ?, updated_at = ? WHERE campaign_id = ? AND id IN ({placeholders})",
             (destination_id, now_iso(), campaign_id, *pc_ids),
         )
     else:
+        travelers = to_jsonable(
+            conn.execute(
+                "SELECT id, exhaustion FROM player_characters WHERE campaign_id = ? AND is_active = 1",
+                (campaign_id,),
+            )
+        )
         conn.execute(
             "UPDATE player_characters SET location_id = ?, updated_at = ? WHERE campaign_id = ? AND is_active = 1",
             (destination_id, now_iso(), campaign_id),
@@ -6173,12 +6233,6 @@ def command_travel_resolve(args: argparse.Namespace, payload: Dict[str, Any]) ->
     pressure_clock: Dict[str, Any] = {}
     if payload.get("consume_rations"):
         ration_name = str(payload.get("ration_item_name", "Rations"))
-        pcs = to_jsonable(
-            conn.execute(
-                "SELECT id, exhaustion FROM player_characters WHERE campaign_id = ? AND is_active = 1",
-                (campaign_id,),
-            )
-        )
         item_id = ensure_item(
             conn,
             campaign_id,
@@ -6187,7 +6241,7 @@ def command_travel_resolve(args: argparse.Namespace, payload: Dict[str, Any]) ->
             {"stackable": True, "consumable": True},
             create_if_missing=True,
         )
-        for pc in pcs:
+        for pc in travelers:
             try:
                 upsert_inventory_quantity(conn, campaign_id, "pc", pc["id"], item_id, -1)
                 consumed_rations += 1
@@ -6268,6 +6322,7 @@ def command_travel_resolve(args: argparse.Namespace, payload: Dict[str, Any]) ->
         {
             "route_id": route_id,
             "destination_id": destination_id,
+            "traveler_pc_ids": [str(row["id"]) for row in travelers],
             "travel_hours": travel_hours_int,
             "time_advance": time_advance,
             "consumed_rations": consumed_rations,
@@ -6283,6 +6338,7 @@ def command_travel_resolve(args: argparse.Namespace, payload: Dict[str, Any]) ->
             "campaign": campaign_id,
             "turn_id": turn_id,
             "destination_id": destination_id,
+            "traveler_pc_ids": [str(row["id"]) for row in travelers],
             "travel_hours": travel_hours_int,
             "time_advance": time_advance,
             "consumed_rations": consumed_rations,
@@ -6310,6 +6366,29 @@ def command_spell_cast(args: argparse.Namespace, payload: Dict[str, Any]) -> Tup
     turn_id = safe_int(turn["id"], "turn_id")
     ts = now_iso()
 
+    normalized_caster_id = str(caster_id)
+    if caster_type == "pc":
+        caster_row = conn.execute(
+            "SELECT id FROM player_characters WHERE campaign_id = ? AND id = ?",
+            (campaign_id, normalized_caster_id),
+        ).fetchone()
+        if caster_row is None:
+            raise DMError("player_not_found", {"campaign": campaign_id, "pc_id": normalized_caster_id})
+    elif caster_type == "npc":
+        caster_row = conn.execute(
+            "SELECT id FROM npcs WHERE campaign_id = ? AND id = ?",
+            (campaign_id, normalized_caster_id),
+        ).fetchone()
+        if caster_row is None:
+            raise DMError("npc_not_found", {"campaign": campaign_id, "npc_id": normalized_caster_id})
+    else:
+        caster_row = conn.execute(
+            "SELECT id FROM combatants WHERE campaign_id = ? AND id = ?",
+            (campaign_id, normalized_caster_id),
+        ).fetchone()
+        if caster_row is None:
+            raise DMError("combatant_not_found", {"campaign": campaign_id, "combatant_id": normalized_caster_id})
+
     requires_concentration = 1 if payload.get("requires_concentration", False) else 0
     if requires_concentration:
         conn.execute(
@@ -6317,9 +6396,9 @@ def command_spell_cast(args: argparse.Namespace, payload: Dict[str, Any]) -> Tup
             DELETE FROM spells_active
             WHERE campaign_id = ? AND caster_type = ? AND caster_id = ? AND requires_concentration = 1
             """,
-            (campaign_id, caster_type, caster_id),
+            (campaign_id, caster_type, normalized_caster_id),
         )
-        set_concentration_for_caster(conn, caster_type, str(caster_id), str(spell_name))
+        set_concentration_for_caster(conn, caster_type, normalized_caster_id, str(spell_name))
 
     spell_id = payload.get("spell_id") or uuid_id("spell")
     remaining_rounds = safe_int(payload.get("remaining_rounds", 0), "remaining_rounds")
@@ -6334,7 +6413,7 @@ def command_spell_cast(args: argparse.Namespace, payload: Dict[str, Any]) -> Tup
             spell_id,
             campaign_id,
             caster_type,
-            str(caster_id),
+            normalized_caster_id,
             str(spell_name),
             str(payload.get("target_type", "")),
             str(payload.get("target_id", "")),
@@ -6351,22 +6430,22 @@ def command_spell_cast(args: argparse.Namespace, payload: Dict[str, Any]) -> Tup
         delta = safe_int(slot_change.get("delta", -1), "delta")
         pc_row = conn.execute(
             "SELECT spell_slots_json FROM player_characters WHERE campaign_id = ? AND id = ?",
-            (campaign_id, caster_id),
+            (campaign_id, normalized_caster_id),
         ).fetchone()
         if pc_row is None:
-            raise DMError("player_not_found", {"pc_id": caster_id})
+            raise DMError("player_not_found", {"pc_id": normalized_caster_id})
         slots = json_load(pc_row["spell_slots_json"], {})
         current = safe_int(slots.get(slot_level, 0), f"spell_slots[{slot_level}]")
         updated = current + delta
         if updated < 0:
             raise DMError(
                 "invalid_spell_slot_state",
-                {"pc_id": caster_id, "slot_level": slot_level, "current": current, "delta": delta},
+                {"pc_id": normalized_caster_id, "slot_level": slot_level, "current": current, "delta": delta},
             )
         slots[slot_level] = updated
         conn.execute(
             "UPDATE player_characters SET spell_slots_json = ?, updated_at = ? WHERE campaign_id = ? AND id = ?",
-            (json.dumps(slots, separators=(",", ":")), ts, campaign_id, caster_id),
+            (json.dumps(slots, separators=(",", ":")), ts, campaign_id, normalized_caster_id),
         )
 
     persist_event(
@@ -6377,7 +6456,7 @@ def command_spell_cast(args: argparse.Namespace, payload: Dict[str, Any]) -> Tup
         {
             "spell_id": spell_id,
             "caster_type": caster_type,
-            "caster_id": caster_id,
+            "caster_id": normalized_caster_id,
             "spell_name": spell_name,
             "remaining_rounds": remaining_rounds,
             "requires_concentration": bool(requires_concentration),
@@ -8487,6 +8566,7 @@ def error_hint(error: str) -> Optional[str]:
         "invalid_hook_entry": "Hook entries must include non-empty text.",
         "invalid_relationship_type": "Relationship endpoint types must be one of: pc, npc, faction, location.",
         "invalid_entity_type": "Entity type must be one of: pc, npc, faction, location.",
+        "invalid_travel_pc_ids": "Use pc_ids as an array of non-empty player IDs.",
     }
     return hints.get(error)
 
@@ -8517,6 +8597,7 @@ def error_message(error: str) -> str:
         "invalid_hook_entry": "Hook entry value is invalid.",
         "invalid_relationship_type": "Relationship type value is invalid.",
         "invalid_entity_type": "Entity type value is invalid.",
+        "invalid_travel_pc_ids": "Travel pc_ids value is invalid.",
     }
     return mapping.get(error, error.replace("_", " "))
 
