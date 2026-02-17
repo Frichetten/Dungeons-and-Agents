@@ -61,13 +61,15 @@ class TestUIContractV1(unittest.TestCase):
                     {
                         "id": "pc_hero",
                         "name": "Arin Vale",
-                        "class": "Rogue",
+                        "class": "Wizard",
                         "level": 3,
                         "max_hp": 24,
                         "current_hp": 24,
                         "ac": 15,
                         "location_id": "loc_start",
                         "initiative_mod": 3,
+                        "spell_slots": {"1": 2, "2": 1},
+                        "prepared_spells": ["Magic Missile", "Shield", "Misty Step", "Fireball"],
                     }
                 ],
                 "npcs": [
@@ -202,7 +204,7 @@ class TestUIContractV1(unittest.TestCase):
                 "max_hp": 16,
                 "current_hp": 16,
                 "ac": 13,
-                "initiative_mod": 1,
+                "initiative_mod": -50,
             },
         )
         started = run_dmctl(
@@ -218,11 +220,17 @@ class TestUIContractV1(unittest.TestCase):
         )
         self.assertEqual(started["data"]["ui"]["template_id"], "combat_turn")
         self.assertEqual(started["data"]["ui"]["ui_contract_version"], UI_CONTRACT_VERSION)
+        self.assertEqual(validate_envelope(started["data"]["ui"]), [])
 
         encounter_id = started["data"]["encounter_id"]
         combatants = started["data"]["combatants"]
         current_actor = combatants[0]
+        self.assertEqual(current_actor["source_type"], "pc")
         target = combatants[1] if len(combatants) > 1 else combatants[0]
+        started_scene = started["data"]["ui"]["sections"][1]["content"]
+        self.assertIn("Options:", started_scene)
+        self.assertIn("Slots", started_scene)
+        self.assertIn("(+1)", started_scene)
         acted = run_dmctl(
             "combat",
             "act",
@@ -231,14 +239,134 @@ class TestUIContractV1(unittest.TestCase):
             payload={
                 "encounter_id": encounter_id,
                 "combatant_id": current_actor["id"],
-                "action": "Shortsword strike",
+                "action": "Cast Magic Missile",
                 "target_id": target["id"],
                 "damage": 3,
+                "spell_slot_changes": [{"pc_id": "pc_hero", "slot_level": "1", "delta": -1}],
                 "end_turn": True,
             },
         )
         self.assertEqual(acted["data"]["ui"]["template_id"], "combat_turn")
         self.assertEqual(acted["data"]["ui"]["ui_contract_version"], UI_CONTRACT_VERSION)
+        self.assertEqual(validate_envelope(acted["data"]["ui"]), [])
+        acted_scene = acted["data"]["ui"]["sections"][1]["content"]
+        self.assertIn("Options:", acted_scene)
+        self.assertIn("Slots 1st 1", acted_scene)
+        acted_outcome = acted["data"]["ui"]["sections"][2]["content"]
+        self.assertNotIn("None", acted_outcome)
+
+    def test_combat_npc_turn_hides_options_line(self):
+        run_dmctl("turn", "begin", "--campaign", self.campaign_id)
+        run_dmctl(
+            "npc",
+            "create",
+            "--campaign",
+            self.campaign_id,
+            payload={
+                "id": "npc_fast_ui",
+                "name": "Quickblade",
+                "location_id": "loc_road",
+                "max_hp": 16,
+                "current_hp": 16,
+                "ac": 14,
+                "initiative_mod": 50,
+            },
+        )
+        started = run_dmctl(
+            "combat",
+            "start",
+            "--campaign",
+            self.campaign_id,
+            payload={
+                "name": "Speed Ambush",
+                "location_id": "loc_road",
+                "participants": [{"type": "pc", "id": "pc_hero"}, {"type": "npc", "id": "npc_fast_ui"}],
+            },
+        )
+        self.assertEqual(validate_envelope(started["data"]["ui"]), [])
+        combatants = started["data"]["combatants"]
+        current_actor = combatants[0]
+        self.assertEqual(current_actor["source_type"], "npc")
+        target = combatants[1] if len(combatants) > 1 else combatants[0]
+        started_scene = started["data"]["ui"]["sections"][1]["content"]
+        self.assertNotIn("Options:", started_scene)
+        self.assertNotIn("Slots ", started_scene)
+
+        acted = run_dmctl(
+            "combat",
+            "act",
+            "--campaign",
+            self.campaign_id,
+            payload={
+                "encounter_id": started["data"]["encounter_id"],
+                "combatant_id": current_actor["id"],
+                "action": "Scimitar slash",
+                "target_id": target["id"],
+                "damage": 4,
+                "end_turn": True,
+            },
+        )
+        self.assertEqual(validate_envelope(acted["data"]["ui"]), [])
+        acted_scene = acted["data"]["ui"]["sections"][1]["content"]
+        self.assertNotIn("Options:", acted_scene)
+        self.assertNotIn("Slots ", acted_scene)
+
+    def test_combat_options_line_tolerates_malformed_slot_counts(self):
+        run_dmctl("turn", "begin", "--campaign", self.campaign_id)
+        run_dmctl(
+            "state",
+            "set",
+            "--campaign",
+            self.campaign_id,
+            payload={
+                "player_characters": [
+                    {
+                        "id": "pc_hero",
+                        "name": "Arin Vale",
+                        "class": "Wizard",
+                        "level": 3,
+                        "max_hp": 24,
+                        "current_hp": 24,
+                        "ac": 15,
+                        "location_id": "loc_start",
+                        "initiative_mod": 3,
+                        "spell_slots": {"1": None, "2": 1},
+                        "prepared_spells": ["Shield", "Misty Step"],
+                    }
+                ]
+            },
+        )
+        run_dmctl(
+            "npc",
+            "create",
+            "--campaign",
+            self.campaign_id,
+            payload={
+                "id": "npc_slow_ui",
+                "name": "Slow Raider",
+                "location_id": "loc_road",
+                "max_hp": 16,
+                "current_hp": 16,
+                "ac": 13,
+                "initiative_mod": -50,
+            },
+        )
+        started = run_dmctl(
+            "combat",
+            "start",
+            "--campaign",
+            self.campaign_id,
+            payload={
+                "name": "Malformed Slot Drill",
+                "location_id": "loc_road",
+                "participants": [{"type": "pc", "id": "pc_hero"}, {"type": "npc", "id": "npc_slow_ui"}],
+            },
+        )
+        self.assertEqual(validate_envelope(started["data"]["ui"]), [])
+        scene = started["data"]["ui"]["sections"][1]["content"]
+        self.assertIn("Options:", scene)
+        self.assertIn("Slots 2nd 1", scene)
+        self.assertNotIn("invalid_integer", started["data"]["ui_markdown"])
 
     def test_failure_responses_include_system_error_template(self):
         failed = run_dmctl(
