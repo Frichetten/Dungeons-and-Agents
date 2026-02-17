@@ -32,6 +32,12 @@ Use canonical terms exactly:
 - Hide backend noise (raw internals, debug IDs, irrelevant fields).
 - For high-pressure states (combat/hazards), keep flavor to one sentence max before critical details.
 
+## Combat Options Line
+
+- In `combat_turn`, use one compact options line for PC turns only.
+- Format as: `Options: <Action/Bonus/Reaction/Move>; Slots <compact slots>; Spells <up to 3 names> (+N)`
+- Keep it to one line and place it in `Scene` after turn context.
+
 ## Delta Notation
 
 Use consistent delta style:

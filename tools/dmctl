@@ -1353,6 +1353,83 @@ def join_lines(lines: Sequence[str], fallback: str = "No update.") -> str:
     return "\n".join(cleaned)
 
 
+def ordinal_suffix(value: int) -> str:
+    if 11 <= value % 100 <= 13:
+        return "th"
+    return {1: "st", 2: "nd", 3: "rd"}.get(value % 10, "th")
+
+
+def spell_slot_label(level: int) -> str:
+    return f"{level}{ordinal_suffix(level)}"
+
+
+def summarize_spell_slots(slots: Dict[str, Any]) -> str:
+    if not isinstance(slots, dict):
+        return "none"
+    pairs: List[Tuple[int, int]] = []
+    for key, value in slots.items():
+        key_text = str(key).strip()
+        if not key_text.isdigit():
+            continue
+        level = int(key_text)
+        if level < 1:
+            continue
+        count = safe_int(value, f"spell_slots[{key_text}]")
+        pairs.append((level, count))
+    if not pairs:
+        return "none"
+    pairs.sort(key=lambda item: item[0])
+    return ", ".join([f"{spell_slot_label(level)} {count}" for level, count in pairs])
+
+
+def summarize_prepared_spells(prepared_spells: Any, max_spells: int = 3) -> str:
+    if not isinstance(prepared_spells, list):
+        return "none"
+    names = [str(spell).strip() for spell in prepared_spells if str(spell).strip()]
+    if not names:
+        return "none"
+    visible = names[:max_spells]
+    summary = ", ".join(visible)
+    overflow = len(names) - len(visible)
+    if overflow > 0:
+        summary += f" (+{overflow})"
+    return summary
+
+
+def build_pc_combat_options_line(combatant: Dict[str, Any], pc: Dict[str, Any]) -> str:
+    action_state = "Action ready" if safe_int(combatant.get("action_used", 0), "action_used") == 0 else "Action spent"
+    bonus_state = (
+        "Bonus ready" if safe_int(combatant.get("bonus_action_used", 0), "bonus_action_used") == 0 else "Bonus spent"
+    )
+    reaction_state = "Reaction ready" if safe_int(combatant.get("reaction_used", 0), "reaction_used") == 0 else "Reaction spent"
+    movement_used = max(0, safe_int(combatant.get("movement_used_ft", 0), "movement_used_ft"))
+    slots = summarize_spell_slots(json_load(pc.get("spell_slots_json"), {}))
+    spells = summarize_prepared_spells(json_load(pc.get("prepared_spells_json"), []))
+    return (
+        f"Options: {action_state}, {bonus_state}, {reaction_state}, Move {movement_used} ft; "
+        f"Slots {slots}; Spells {spells}"
+    )
+
+
+def maybe_build_pc_combat_options_line(
+    conn: sqlite3.Connection, campaign_id: str, combatant: Optional[Dict[str, Any]]
+) -> str:
+    if not isinstance(combatant, dict):
+        return ""
+    if str(combatant.get("source_type", "")).lower() != "pc":
+        return ""
+    source_id = str(combatant.get("source_id", "")).strip()
+    if not source_id:
+        return ""
+    pc_row = conn.execute(
+        "SELECT spell_slots_json, prepared_spells_json FROM player_characters WHERE campaign_id = ? AND id = ?",
+        (campaign_id, source_id),
+    ).fetchone()
+    if pc_row is None:
+        return ""
+    return build_pc_combat_options_line(combatant, as_dict(pc_row))
+
+
 def attach_ui_envelope(data: Dict[str, Any], envelope: Dict[str, Any]) -> Dict[str, Any]:
     validate_envelope_or_raise(envelope)
     wrapped = dict(data)
@@ -1443,6 +1520,10 @@ def build_combat_start_envelope(data: Dict[str, Any]) -> Dict[str, Any]:
         f"{row.get('name', 'Unknown')} init {row.get('initiative', '?')} HP {row.get('current_hp', '?')}/{row.get('max_hp', '?')}"
         for row in combatants
     ]
+    options_line = str(data.get("current_actor_options", "")).strip()
+    scene_lines = [f"Encounter {data.get('encounter_id', 'unknown')} begins. Round {data.get('round', 1)}."]
+    if options_line:
+        scene_lines.append(options_line)
     sections = [
         {
             "id": "rolls",
@@ -1458,7 +1539,7 @@ def build_combat_start_envelope(data: Dict[str, Any]) -> Dict[str, Any]:
         {
             "id": "scene",
             "label": "Scene",
-            "content": f"Encounter {data.get('encounter_id', 'unknown')} begins. Round {data.get('round', 1)}.",
+            "content": join_lines(scene_lines),
         },
         {"id": "outcome", "label": "Outcome", "content": join_lines(combatant_lines, fallback="No combatants were created.")},
     ]
@@ -1468,6 +1549,17 @@ def build_combat_start_envelope(data: Dict[str, Any]) -> Dict[str, Any]:
 def build_combat_turn_envelope(data: Dict[str, Any]) -> Dict[str, Any]:
     current_actor = data.get("current_actor", {}) if isinstance(data.get("current_actor"), dict) else {}
     next_actor = data.get("next_actor", {}) if isinstance(data.get("next_actor"), dict) else {}
+    options_line = str(data.get("current_actor_options", "")).strip()
+    round_summary = data.get("round_summary")
+    round_summary_line = round_summary.strip() if isinstance(round_summary, str) else ""
+    scene_lines = [
+        f"Round {data.get('round', '?')} in encounter {data.get('encounter_id', 'unknown')}.",
+        f"Actor: {current_actor.get('name', current_actor.get('id', 'Unknown'))} ({data.get('action_type', 'action')})",
+        f"Spend: Bonus {'yes' if bool(data.get('bonus_action')) else 'no'}, "
+        f"Reaction {'yes' if bool(data.get('reaction')) else 'no'}, Move {data.get('movement_ft', 0)} ft",
+    ]
+    if options_line:
+        scene_lines.append(options_line)
 
     sections = [
         {
@@ -1478,16 +1570,7 @@ def build_combat_turn_envelope(data: Dict[str, Any]) -> Dict[str, Any]:
         {
             "id": "scene",
             "label": "Scene",
-            "content": join_lines(
-                [
-                    f"Round {data.get('round', '?')} in encounter {data.get('encounter_id', 'unknown')}.",
-                    f"Actor: {current_actor.get('name', current_actor.get('id', 'Unknown'))}",
-                    f"Action Type: {data.get('action_type', 'action')}",
-                    f"Bonus Action used: {bool(data.get('bonus_action'))}",
-                    f"Reaction mode: {bool(data.get('reaction'))}",
-                    f"Movement used: {data.get('movement_ft', 0)} ft",
-                ]
-            ),
+            "content": join_lines(scene_lines),
         },
         {
             "id": "outcome",
@@ -1496,7 +1579,7 @@ def build_combat_turn_envelope(data: Dict[str, Any]) -> Dict[str, Any]:
                 [
                     f"Action: {data.get('action', 'acts')}",
                     f"Next actor: {next_actor.get('name', next_actor.get('id', 'Unknown'))}",
-                    str(data.get("round_summary", "")).strip(),
+                    round_summary_line,
                 ]
             ),
         },
@@ -7437,6 +7520,7 @@ def command_combat_start(args: argparse.Namespace, payload: Dict[str, Any]) -> T
             (encounter_id,),
         )
     )
+    current_actor_options = maybe_build_pc_combat_options_line(conn, campaign_id, combatants[0] if combatants else None)
     conn.close()
 
     response_data = {
@@ -7444,6 +7528,7 @@ def command_combat_start(args: argparse.Namespace, payload: Dict[str, Any]) -> T
         "round": 1,
         "turn_index": 0,
         "combatants": combatants,
+        "current_actor_options": current_actor_options,
         "turn_id": turn_id,
     }
     response_data = attach_ui_envelope(response_data, build_combat_start_envelope(response_data))
@@ -7760,13 +7845,17 @@ def command_combat_act(args: argparse.Namespace, payload: Dict[str, Any]) -> Tup
 
     conn.commit()
     latest = get_encounter_combatants(conn, encounter_id)
+    latest_by_id = {row["id"]: row for row in latest}
+    current_actor_after = latest_by_id.get(acting_row["id"], acting_row)
+    current_actor_options = maybe_build_pc_combat_options_line(conn, campaign_id, as_dict(current_actor_after))
     next_actor = latest[next_turn_index] if latest else None
     conn.close()
 
     response_data = {
         "encounter_id": encounter_id,
         "round": round_number,
-        "current_actor": as_dict(acting_row),
+        "current_actor": as_dict(current_actor_after),
+        "current_actor_options": current_actor_options,
         "next_actor": as_dict(next_actor),
         "action": action_summary,
         "action_type": action_type,
