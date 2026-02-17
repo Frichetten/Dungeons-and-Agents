@@ -311,6 +311,63 @@ class TestUIContractV1(unittest.TestCase):
         self.assertNotIn("Options:", acted_scene)
         self.assertNotIn("Slots ", acted_scene)
 
+    def test_combat_options_line_tolerates_malformed_slot_counts(self):
+        run_dmctl("turn", "begin", "--campaign", self.campaign_id)
+        run_dmctl(
+            "state",
+            "set",
+            "--campaign",
+            self.campaign_id,
+            payload={
+                "player_characters": [
+                    {
+                        "id": "pc_hero",
+                        "name": "Arin Vale",
+                        "class": "Wizard",
+                        "level": 3,
+                        "max_hp": 24,
+                        "current_hp": 24,
+                        "ac": 15,
+                        "location_id": "loc_start",
+                        "initiative_mod": 3,
+                        "spell_slots": {"1": None, "2": 1},
+                        "prepared_spells": ["Shield", "Misty Step"],
+                    }
+                ]
+            },
+        )
+        run_dmctl(
+            "npc",
+            "create",
+            "--campaign",
+            self.campaign_id,
+            payload={
+                "id": "npc_slow_ui",
+                "name": "Slow Raider",
+                "location_id": "loc_road",
+                "max_hp": 16,
+                "current_hp": 16,
+                "ac": 13,
+                "initiative_mod": -50,
+            },
+        )
+        started = run_dmctl(
+            "combat",
+            "start",
+            "--campaign",
+            self.campaign_id,
+            payload={
+                "name": "Malformed Slot Drill",
+                "location_id": "loc_road",
+                "participants": [{"type": "pc", "id": "pc_hero"}, {"type": "npc", "id": "npc_slow_ui"}],
+            },
+        )
+        self.assertEqual(validate_envelope(started["data"]["ui"]), [])
+        scene = started["data"]["ui"]["sections"][1]["content"]
+        self.assertIn("Options:", scene)
+        self.assertIn("Slots 2nd 1", scene)
+        self.assertNotIn("invalid_integer", started["data"]["ui_markdown"])
+
     def test_failure_responses_include_system_error_template(self):
         failed = run_dmctl(
             "state",

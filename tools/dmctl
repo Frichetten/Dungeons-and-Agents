@@ -1374,7 +1374,13 @@ def summarize_spell_slots(slots: Dict[str, Any]) -> str:
         level = int(key_text)
         if level < 1:
             continue
-        count = safe_int(value, f"spell_slots[{key_text}]")
+        # Rendering should never fail due to malformed imported slot counts.
+        try:
+            count = int(value)
+        except (TypeError, ValueError):
+            continue
+        if count < 0:
+            count = 0
         pairs.append((level, count))
     if not pairs:
         return "none"
