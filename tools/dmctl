@@ -25,7 +25,7 @@ from dm.ui_contract import (
     validate_envelope_or_raise,
 )
 
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 SQLITE_BUSY_TIMEOUT_MS = 5000
 
 CALENDAR_MONTHS = [
@@ -97,6 +97,20 @@ PLAYER_FORBIDDEN_PAYLOAD_KEYS = frozenset(
         "path",
     }
 )
+ROLL_POLICY_MODES = {"warn", "strict"}
+ROLL_POLICY_DECISIONS = {
+    "roll_required",
+    "no_roll",
+    "use_passive",
+    "auto_success_with_cost",
+    "deterministic_world_update",
+}
+ROLL_POLICY_NON_ROLL_DECISIONS = {
+    "no_roll",
+    "use_passive",
+    "auto_success_with_cost",
+    "deterministic_world_update",
+}
 
 
 class DMError(Exception):
@@ -1635,6 +1649,15 @@ def build_ooc_panel_envelope(action: str, data: Dict[str, Any]) -> Dict[str, Any
         resources.append(
             f"Active encounter: {data['active_encounter'].get('name', data['active_encounter'].get('id'))}"
         )
+    if isinstance(data.get("roll_policy"), dict):
+        policy = data["roll_policy"]
+        total_rolls = safe_int(policy.get("total_rolls", 0), "roll_policy.total_rolls")
+        flagged_rolls = safe_int(policy.get("flagged_rolls", 0), "roll_policy.flagged_rolls")
+        adjudicated_rolls = safe_int(policy.get("adjudicated_rolls", 0), "roll_policy.adjudicated_rolls")
+        ratio = (flagged_rolls / total_rolls) if total_rolls > 0 else 0.0
+        resources.append(
+            f"Roll policy: flagged {flagged_rolls}/{total_rolls} ({ratio:.0%}); adjudicated {adjudicated_rolls}"
+        )
 
     objectives: List[str] = []
     open_quests = data.get("open_quests")
@@ -2564,6 +2587,266 @@ def roll_dice(
     }
 
 
+def normalize_roll_policy_mode(value: Any, *, field: str = "policy_mode", default: str = "warn") -> str:
+    mode = str(value if value is not None else default).strip().lower() or default
+    if mode not in ROLL_POLICY_MODES:
+        raise DMError("invalid_roll_policy_mode", {"field": field, "value": value, "allowed": sorted(ROLL_POLICY_MODES)})
+    return mode
+
+
+def normalize_roll_policy_decision(value: Any, *, field: str = "decision", allow_empty: bool = False) -> str:
+    decision = str(value or "").strip().lower()
+    if not decision and allow_empty:
+        return ""
+    if decision not in ROLL_POLICY_DECISIONS:
+        raise DMError(
+            "invalid_roll_policy_decision",
+            {"field": field, "value": value, "allowed": sorted(ROLL_POLICY_DECISIONS)},
+        )
+    return decision
+
+
+def normalize_reason_codes(value: Any) -> List[str]:
+    raw: List[str]
+    if value in (None, ""):
+        raw = []
+    elif isinstance(value, str):
+        raw = [part.strip().lower() for part in value.split(",")]
+    elif isinstance(value, list):
+        raw = [str(item).strip().lower() for item in value]
+    else:
+        raw = [str(value).strip().lower()]
+
+    seen: List[str] = []
+    for item in raw:
+        token = re.sub(r"[^a-z0-9_]+", "_", item).strip("_")
+        if token and token not in seen:
+            seen.append(token)
+    return seen
+
+
+def roll_policy_recommended_resolution(decision: str) -> str:
+    mapping = {
+        "roll_required": "roll_once_for_intent",
+        "no_roll": "resolve_in_narrative_and_state",
+        "use_passive": "use_passive_scores_or_established_facts",
+        "auto_success_with_cost": "apply_success_with_cost_and_persist",
+        "deterministic_world_update": "use_world_pulse_clocks_or_state_set",
+    }
+    return mapping.get(decision, "resolve_in_narrative_and_state")
+
+
+def make_roll_adjudication_id(decision: str) -> str:
+    return f"adj_{decision}_{uuid.uuid4().hex[:10]}"
+
+
+def decision_from_adjudication_id(adjudication_id: str) -> str:
+    match = re.match(r"^adj_([a-z_]+)_[0-9a-f]+$", adjudication_id.strip().lower())
+    if not match:
+        return ""
+    decision = match.group(1)
+    if decision in ROLL_POLICY_DECISIONS:
+        return decision
+    return ""
+
+
+def adjudicate_roll_necessity(payload: Dict[str, Any]) -> Dict[str, Any]:
+    intent = str(payload.get("intent") or "").strip()
+    scene_type = str(payload.get("scene_type") or "scene").strip().lower() or "scene"
+    stakes = str(payload.get("stakes") or "medium").strip().lower() or "medium"
+    uncertainty_source = str(payload.get("uncertainty_source") or "").strip().lower()
+    opposition = safe_bool(payload.get("opposition"), "opposition", default=False)
+    retryable_without_cost = safe_bool(payload.get("retryable_without_cost"), "retryable_without_cost", default=False)
+    approach_changed = safe_bool(payload.get("approach_changed"), "approach_changed", default=False)
+    immediate_player_stakes = safe_bool(payload.get("immediate_player_stakes"), "immediate_player_stakes", default=True)
+    combat_context = safe_bool(payload.get("combat_context"), "combat_context", default=False)
+    proposed_roll = str(payload.get("proposed_roll") or "").strip()
+    policy_mode = normalize_roll_policy_mode(payload.get("policy_mode"), field="policy_mode", default="warn")
+
+    intent_l = intent.lower()
+    wait_terms = (
+        "wait",
+        "waiting",
+        "hold",
+        "holding",
+        "watch",
+        "stand by",
+        "linger",
+        "stay put",
+        "idle",
+    )
+    passive_terms = (
+        "passive",
+        "observe",
+        "scan",
+        "read",
+        "insight",
+        "perception",
+        "notice",
+        "recall",
+    )
+    is_wait_action = any(term in intent_l for term in wait_terms)
+    is_passive_action = any(term in intent_l for term in passive_terms)
+    world_rng_sources = {
+        "world_generation",
+        "weather",
+        "ambient",
+        "background_timing",
+        "availability",
+        "random_encounter",
+        "encounter_table",
+    }
+    contested_sources = {
+        "opposed_action",
+        "hazard",
+        "social_resistance",
+        "resource_pressure",
+        "timing_window",
+    }
+
+    decision = "roll_required"
+    reason_codes: List[str] = []
+
+    if combat_context or scene_type == "combat":
+        decision = "roll_required"
+        reason_codes = ["combat_context"]
+    elif not immediate_player_stakes:
+        if uncertainty_source in world_rng_sources or scene_type in {"travel", "downtime", "world"} or is_wait_action:
+            decision = "deterministic_world_update"
+            reason_codes = ["no_immediate_player_stakes", "world_generation_should_be_deterministic"]
+        else:
+            decision = "no_roll"
+            reason_codes = ["no_immediate_player_stakes"]
+    elif uncertainty_source in world_rng_sources:
+        decision = "deterministic_world_update"
+        reason_codes = ["world_generation_should_be_deterministic"]
+    elif is_wait_action and stakes in {"none", "low"} and not opposition:
+        decision = "no_roll"
+        reason_codes = ["trivial_wait_action"]
+    elif is_passive_action or uncertainty_source in {"passive_observation", "passive_insight", "hidden_information"}:
+        decision = "use_passive"
+        reason_codes = ["passive_resolution_preferred"]
+    elif retryable_without_cost and not approach_changed and not opposition:
+        decision = "no_roll"
+        reason_codes = ["retry_without_cost", "one_roll_per_intent"]
+    elif stakes in {"high", "severe"} or opposition or uncertainty_source in contested_sources:
+        decision = "roll_required"
+        reason_codes = ["contested_or_high_stakes"]
+    elif stakes == "medium" and not opposition and not retryable_without_cost:
+        decision = "auto_success_with_cost"
+        reason_codes = ["success_with_cost_preferred"]
+    else:
+        decision = "roll_required"
+        reason_codes = ["meaningful_uncertainty"]
+
+    strict_violation = decision in ROLL_POLICY_NON_ROLL_DECISIONS and not combat_context
+    adjudication_id = make_roll_adjudication_id(decision)
+    return {
+        "adjudication_id": adjudication_id,
+        "decision": decision,
+        "reason_codes": reason_codes,
+        "recommended_resolution": roll_policy_recommended_resolution(decision),
+        "strict_violation": strict_violation,
+        "policy_mode": policy_mode,
+        "intent": intent,
+        "scene_type": scene_type,
+        "stakes": stakes,
+        "uncertainty_source": uncertainty_source,
+        "opposition": opposition,
+        "retryable_without_cost": retryable_without_cost,
+        "approach_changed": approach_changed,
+        "immediate_player_stakes": immediate_player_stakes,
+        "combat_context": combat_context,
+        "proposed_roll": proposed_roll,
+    }
+
+
+def normalize_roll_adjudication_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
+    adjudication_raw = payload.get("adjudication")
+    if adjudication_raw not in (None, {}) and not isinstance(adjudication_raw, dict):
+        raise DMError("invalid_roll_adjudication_payload", {"adjudication": adjudication_raw})
+
+    mode_source = payload.get("policy_mode")
+    if mode_source in (None, "") and isinstance(adjudication_raw, dict):
+        mode_source = adjudication_raw.get("policy_mode")
+    policy_mode = normalize_roll_policy_mode(mode_source, field="policy_mode", default="warn")
+    decision = ""
+    reason_codes: List[str] = []
+    recommended_resolution = ""
+    strict_violation = False
+    approach_changed = safe_bool(payload.get("approach_changed"), "approach_changed", default=False)
+
+    adjudication_id = str(payload.get("adjudication_id") or "").strip()
+    override_reason = str(payload.get("override_reason") or "").strip()
+    combat_context = safe_bool(payload.get("combat_context"), "combat_context", default=False)
+    immediate_player_stakes = safe_bool(payload.get("immediate_player_stakes"), "immediate_player_stakes", default=True)
+
+    if isinstance(adjudication_raw, dict):
+        decision = normalize_roll_policy_decision(
+            adjudication_raw.get("decision"),
+            field="adjudication.decision",
+            allow_empty=True,
+        )
+        reason_codes = normalize_reason_codes(adjudication_raw.get("reason_codes"))
+        recommended_resolution = str(adjudication_raw.get("recommended_resolution") or "").strip()
+        strict_violation = safe_bool(
+            adjudication_raw.get("strict_violation"),
+            "adjudication.strict_violation",
+            default=False,
+        )
+        approach_changed = safe_bool(
+            adjudication_raw.get("approach_changed"),
+            "adjudication.approach_changed",
+            default=approach_changed,
+        )
+        if not adjudication_id:
+            adjudication_id = str(
+                adjudication_raw.get("adjudication_id") or adjudication_raw.get("id") or ""
+            ).strip()
+        if not decision and adjudication_id:
+            decision = decision_from_adjudication_id(adjudication_id)
+
+    if not decision and adjudication_id:
+        decision = decision_from_adjudication_id(adjudication_id)
+
+    if decision and not recommended_resolution:
+        recommended_resolution = roll_policy_recommended_resolution(decision)
+    if decision and not reason_codes:
+        reason_codes = ["adjudication_attached"]
+    if decision and not strict_violation:
+        strict_violation = decision in ROLL_POLICY_NON_ROLL_DECISIONS and not combat_context
+    if decision and not adjudication_id:
+        adjudication_id = make_roll_adjudication_id(decision)
+    if not decision and combat_context:
+        decision = "roll_required"
+        reason_codes = ["combat_context"]
+        strict_violation = False
+        recommended_resolution = roll_policy_recommended_resolution(decision)
+        adjudication_id = adjudication_id or make_roll_adjudication_id(decision)
+
+    has_adjudication = bool(decision or adjudication_id or isinstance(adjudication_raw, dict))
+    return {
+        "has_adjudication": has_adjudication,
+        "adjudication_id": adjudication_id,
+        "decision": decision,
+        "reason_codes": reason_codes,
+        "recommended_resolution": recommended_resolution,
+        "policy_mode": policy_mode,
+        "strict_violation": strict_violation,
+        "override_reason": override_reason,
+        "approach_changed": approach_changed,
+        "combat_context": combat_context,
+        "immediate_player_stakes": immediate_player_stakes,
+    }
+
+
+def command_dice_adjudicate(args: argparse.Namespace, payload: Dict[str, Any]) -> Tuple[Dict[str, Any], List[str]]:
+    campaign_id = require_campaign(args.campaign or payload.get("campaign"))
+    data = adjudicate_roll_necessity(payload)
+    data["campaign"] = campaign_id
+    return (data, [])
+
+
 def parse_turn_id(turn: Optional[sqlite3.Row]) -> Optional[int]:
     if turn is None:
         return None
@@ -2574,6 +2857,7 @@ def validate_campaign_state(campaign_id: str, *, include_event_log_parity: bool 
     errors: List[str] = []
     warnings: List[str] = []
     event_log_parity: Optional[Dict[str, Any]] = None
+    roll_policy: Optional[Dict[str, Any]] = None
 
     cdir = campaign_dir(campaign_id)
     db_path = campaign_db_path(campaign_id)
@@ -2768,6 +3052,14 @@ def validate_campaign_state(campaign_id: str, *, include_event_log_parity: bool 
         if spell_orphans:
             errors.append(f"invalid active spell casters found: {spell_orphans}")
 
+        roll_policy = fetch_roll_policy_metrics(conn, campaign_id, limit=8)
+        total_rolls = safe_int(roll_policy.get("total_rolls", 0), "roll_policy.total_rolls")
+        flagged_rolls = safe_int(roll_policy.get("flagged_rolls", 0), "roll_policy.flagged_rolls")
+        if total_rolls > 0 and flagged_rolls > 0:
+            warnings.append(f"roll_policy_flagged:{flagged_rolls}/{total_rolls}")
+        if total_rolls > 0 and safe_int(roll_policy.get("adjudicated_rolls", 0), "roll_policy.adjudicated_rolls") == 0:
+            warnings.append("roll_policy_adjudication_missing_all")
+
         if snap_path.exists():
             try:
                 snap = json.loads(snap_path.read_text(encoding="utf-8"))
@@ -2793,6 +3085,8 @@ def validate_campaign_state(campaign_id: str, *, include_event_log_parity: bool 
     payload: Dict[str, Any] = {"campaign": campaign_id, "errors": errors, "warnings": warnings}
     if event_log_parity is not None:
         payload["event_log_parity"] = event_log_parity
+    if roll_policy is not None:
+        payload["roll_policy"] = roll_policy
     return payload
 
 
@@ -3797,16 +4091,120 @@ def command_dice_roll(args: argparse.Namespace, payload: Dict[str, Any]) -> Tupl
 
     campaign_id = args.campaign or payload.get("campaign")
     context = args.context or payload.get("context") or ""
+    warnings: List[str] = []
+    policy_meta = normalize_roll_adjudication_payload(payload)
+    reason_codes = list(policy_meta.get("reason_codes") or [])
+
+    context_l = context.strip().lower()
+    if not policy_meta["combat_context"] and (
+        context_l.startswith("combat_resolve_") or context_l.startswith("combat_") or context_l.startswith("combat:")
+    ):
+        policy_meta["combat_context"] = True
+        if not policy_meta["decision"]:
+            policy_meta["decision"] = "roll_required"
+            reason_codes = ["combat_context"]
+            policy_meta["strict_violation"] = False
+            policy_meta["recommended_resolution"] = roll_policy_recommended_resolution("roll_required")
+            policy_meta["adjudication_id"] = policy_meta["adjudication_id"] or make_roll_adjudication_id("roll_required")
+
+    missing_adjudication = not policy_meta["combat_context"] and not policy_meta["has_adjudication"]
+    if missing_adjudication:
+        policy_meta["strict_violation"] = True
+        if "missing_adjudication" not in reason_codes:
+            reason_codes.append("missing_adjudication")
 
     persist_roll = bool(payload.get("persist", True))
-    if campaign_id:
-        roll["campaign"] = campaign_id
-        roll["context"] = context
-
-    if campaign_id and persist_roll:
+    conn: Optional[sqlite3.Connection] = None
+    turn_id: Optional[int] = None
+    duplicate_intent = False
+    needs_turn_context = bool(
+        not policy_meta["combat_context"]
+        and context
+        and not policy_meta.get("approach_changed", False)
+    )
+    if campaign_id and (persist_roll or needs_turn_context):
         conn = connect_campaign_db(campaign_id)
         open_turn = get_open_turn(conn, campaign_id)
         turn_id = parse_turn_id(open_turn)
+        if (
+            not policy_meta["combat_context"]
+            and context
+            and turn_id is not None
+            and not policy_meta.get("approach_changed", False)
+        ):
+            row = conn.execute(
+                """
+                SELECT COUNT(*) AS c
+                FROM roll_log
+                WHERE campaign_id = ? AND turn_id = ? AND context = ?
+                """,
+                (campaign_id, turn_id, context),
+            ).fetchone()
+            duplicate_intent = bool(row and safe_int(row["c"], "duplicate_context_count") > 0)
+            if duplicate_intent:
+                policy_meta["strict_violation"] = True
+                if "duplicate_intent_roll" not in reason_codes:
+                    reason_codes.append("duplicate_intent_roll")
+
+    if policy_meta["policy_mode"] == "strict" and policy_meta["strict_violation"] and not policy_meta["override_reason"]:
+        if conn is not None:
+            conn.close()
+        if missing_adjudication:
+            raise DMError(
+                "roll_adjudication_required",
+                {
+                    "campaign": campaign_id,
+                    "context": context,
+                    "formula": formula,
+                    "message": "Non-combat rolls require dice adjudication in strict mode.",
+                },
+            )
+        raise DMError(
+            "roll_policy_violation",
+            {
+                "campaign": campaign_id,
+                "context": context,
+                "formula": formula,
+                "decision": policy_meta["decision"],
+                "reason_codes": reason_codes,
+                "message": "Roll blocked by roll necessity policy in strict mode.",
+            },
+        )
+
+    if policy_meta["strict_violation"] and not policy_meta["override_reason"]:
+        warnings.append("roll_policy_violation")
+    if policy_meta["override_reason"] and policy_meta["strict_violation"]:
+        warnings.append("roll_policy_override_applied")
+    if duplicate_intent and "duplicate_intent_roll" not in warnings:
+        warnings.append("duplicate_intent_roll")
+
+    policy_decision = str(policy_meta.get("decision") or "")
+    adjudication_id = str(policy_meta.get("adjudication_id") or "")
+    reason_codes = normalize_reason_codes(reason_codes)
+    override_reason = str(policy_meta.get("override_reason") or "")
+    strict_violation = bool(policy_meta.get("strict_violation", False))
+    policy_mode = str(policy_meta.get("policy_mode") or "warn")
+
+    if campaign_id:
+        roll["campaign"] = campaign_id
+        roll["context"] = context
+    roll["adjudication_id"] = adjudication_id
+    roll["policy_decision"] = policy_decision
+    roll["policy_mode"] = policy_mode
+    roll["strict_violation"] = strict_violation
+    roll["override_reason"] = override_reason
+    roll["reason_codes"] = reason_codes
+    roll["recommended_resolution"] = (
+        policy_meta.get("recommended_resolution") or roll_policy_recommended_resolution(policy_decision)
+        if policy_decision
+        else ""
+    )
+
+    if campaign_id and persist_roll:
+        if conn is None:
+            conn = connect_campaign_db(campaign_id)
+            open_turn = get_open_turn(conn, campaign_id)
+            turn_id = parse_turn_id(open_turn)
         roll_id = uuid_id("roll")
         ts = now_iso()
 
@@ -3814,8 +4212,10 @@ def command_dice_roll(args: argparse.Namespace, payload: Dict[str, Any]) -> Tupl
             """
             INSERT INTO roll_log (
                 id, campaign_id, turn_id, formula, raw_dice_json,
-                selected_dice_json, modifier, total, context, advantage_state, created_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                selected_dice_json, modifier, total, context, advantage_state,
+                adjudication_id, policy_decision, policy_mode, strict_violation,
+                override_reason, reason_codes_json, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 roll_id,
@@ -3828,6 +4228,12 @@ def command_dice_roll(args: argparse.Namespace, payload: Dict[str, Any]) -> Tupl
                 roll["total"],
                 context,
                 roll["advantage_state"],
+                adjudication_id,
+                policy_decision,
+                policy_mode,
+                1 if strict_violation else 0,
+                override_reason,
+                json.dumps(reason_codes, separators=(",", ":")),
                 ts,
             ),
         )
@@ -3846,15 +4252,23 @@ def command_dice_roll(args: argparse.Namespace, payload: Dict[str, Any]) -> Tupl
                 "total": roll["total"],
                 "context": context,
                 "advantage_state": roll["advantage_state"],
+                "adjudication_id": adjudication_id,
+                "policy_decision": policy_decision,
+                "policy_mode": policy_mode,
+                "strict_violation": strict_violation,
+                "override_reason": override_reason,
+                "reason_codes": reason_codes,
             },
         )
 
         conn.commit()
-        conn.close()
         roll["roll_id"] = roll_id
         roll["turn_id"] = turn_id
 
-    return (roll, [])
+    if conn is not None:
+        conn.close()
+
+    return (roll, warnings)
 
 
 def persist_roll_results(campaign_id: str, rolls: List[Dict[str, Any]]) -> None:
@@ -3875,8 +4289,10 @@ def persist_roll_results(campaign_id: str, rolls: List[Dict[str, Any]]) -> None:
                 """
                 INSERT INTO roll_log (
                     id, campaign_id, turn_id, formula, raw_dice_json,
-                    selected_dice_json, modifier, total, context, advantage_state, created_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    selected_dice_json, modifier, total, context, advantage_state,
+                    adjudication_id, policy_decision, policy_mode, strict_violation,
+                    override_reason, reason_codes_json, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     roll_id,
@@ -3889,6 +4305,12 @@ def persist_roll_results(campaign_id: str, rolls: List[Dict[str, Any]]) -> None:
                     safe_int(result.get("total", 0), "total"),
                     context,
                     str(result.get("advantage_state") or "none"),
+                    str(result.get("adjudication_id") or ""),
+                    str(result.get("policy_decision") or "roll_required"),
+                    normalize_roll_policy_mode(result.get("policy_mode"), field="result.policy_mode", default="warn"),
+                    1 if safe_bool(result.get("strict_violation"), "result.strict_violation", default=False) else 0,
+                    str(result.get("override_reason") or ""),
+                    json.dumps(normalize_reason_codes(result.get("reason_codes")), separators=(",", ":")),
                     ts,
                 ),
             )
@@ -3906,6 +4328,12 @@ def persist_roll_results(campaign_id: str, rolls: List[Dict[str, Any]]) -> None:
                     "total": safe_int(result.get("total", 0), "total"),
                     "context": context,
                     "advantage_state": str(result.get("advantage_state") or "none"),
+                    "adjudication_id": str(result.get("adjudication_id") or ""),
+                    "policy_decision": str(result.get("policy_decision") or "roll_required"),
+                    "policy_mode": normalize_roll_policy_mode(result.get("policy_mode"), field="result.policy_mode", default="warn"),
+                    "strict_violation": safe_bool(result.get("strict_violation"), "result.strict_violation", default=False),
+                    "override_reason": str(result.get("override_reason") or ""),
+                    "reason_codes": normalize_reason_codes(result.get("reason_codes")),
                 },
             )
             result["roll_id"] = roll_id
@@ -6952,6 +7380,77 @@ def fetch_recent_rewards(
     return rewards
 
 
+def fetch_roll_policy_metrics(
+    conn: sqlite3.Connection,
+    campaign_id: str,
+    *,
+    limit: int = 8,
+) -> Dict[str, Any]:
+    summary_row = conn.execute(
+        """
+        SELECT
+            COUNT(*) AS total_rolls,
+            SUM(CASE WHEN strict_violation = 1 THEN 1 ELSE 0 END) AS flagged_rolls,
+            SUM(CASE WHEN policy_decision != '' THEN 1 ELSE 0 END) AS adjudicated_rolls,
+            SUM(CASE WHEN override_reason != '' THEN 1 ELSE 0 END) AS override_rolls
+        FROM roll_log
+        WHERE campaign_id = ?
+        """,
+        (campaign_id,),
+    ).fetchone()
+    total_rolls = safe_int(summary_row["total_rolls"], "roll_policy.total_rolls") if summary_row else 0
+    flagged_rolls = safe_int(summary_row["flagged_rolls"] or 0, "roll_policy.flagged_rolls") if summary_row else 0
+    adjudicated_rolls = safe_int(summary_row["adjudicated_rolls"] or 0, "roll_policy.adjudicated_rolls") if summary_row else 0
+    override_rolls = safe_int(summary_row["override_rolls"] or 0, "roll_policy.override_rolls") if summary_row else 0
+
+    decision_rows = to_jsonable(
+        conn.execute(
+            """
+            SELECT policy_decision, COUNT(*) AS count
+            FROM roll_log
+            WHERE campaign_id = ? AND policy_decision != ''
+            GROUP BY policy_decision
+            ORDER BY count DESC, policy_decision ASC
+            LIMIT ?
+            """,
+            (campaign_id, max(1, limit)),
+        )
+    )
+
+    reason_counter: Dict[str, int] = {}
+    reason_rows = to_jsonable(
+        conn.execute(
+            """
+            SELECT reason_codes_json
+            FROM roll_log
+            WHERE campaign_id = ?
+            ORDER BY created_at DESC
+            LIMIT 500
+            """,
+            (campaign_id,),
+        )
+    )
+    for row in reason_rows:
+        for code in normalize_reason_codes(json_load(row.get("reason_codes_json"), [])):
+            reason_counter[code] = reason_counter.get(code, 0) + 1
+
+    top_reason_codes = [
+        {"code": code, "count": count}
+        for code, count in sorted(reason_counter.items(), key=lambda item: (-item[1], item[0]))[: max(1, limit)]
+    ]
+
+    flagged_ratio = round((flagged_rolls / total_rolls), 4) if total_rolls > 0 else 0.0
+    return {
+        "total_rolls": total_rolls,
+        "flagged_rolls": flagged_rolls,
+        "flagged_ratio": flagged_ratio,
+        "adjudicated_rolls": adjudicated_rolls,
+        "override_rolls": override_rolls,
+        "top_reason_codes": top_reason_codes,
+        "decision_breakdown": decision_rows,
+    }
+
+
 def fetch_active_pressures(conn: sqlite3.Connection, campaign_id: str) -> Dict[str, Any]:
     world = conn.execute(
         "SELECT legal_heat, notoriety FROM world_state WHERE campaign_id = ?",
@@ -7767,6 +8266,11 @@ def command_ooc(args: argparse.Namespace, payload: Dict[str, Any]) -> Tuple[Dict
                 latest_turn_diff["diff_summary"] = summarize_turn_diff(diff_payload)
         recent_rewards = fetch_recent_rewards(conn, campaign_id, limit=max(1, safe_int(payload.get("rewards_limit", 5), "rewards_limit")))
         active_pressures = fetch_active_pressures(conn, campaign_id)
+        roll_policy = fetch_roll_policy_metrics(
+            conn,
+            campaign_id,
+            limit=max(1, safe_int(payload.get("roll_policy_limit", 8), "roll_policy_limit")),
+        )
         next_payoff_hooks = fetch_next_payoff_hooks(
             conn,
             campaign_id,
@@ -7782,6 +8286,7 @@ def command_ooc(args: argparse.Namespace, payload: Dict[str, Any]) -> Tuple[Dict
                 "counts": as_dict(counts),
                 "recent_rewards": recent_rewards,
                 "active_pressures": active_pressures,
+                "roll_policy": roll_policy,
                 "next_payoff_hooks": next_payoff_hooks,
                 "latest_turn_diff": latest_turn_diff,
             }
@@ -8906,6 +9411,7 @@ def command_map() -> Dict[Tuple[str, str], Any]:
         ("turn", "commit"): command_turn_commit,
         ("turn", "rollback"): command_turn_rollback,
         ("turn", "diff"): command_turn_diff,
+        ("dice", "adjudicate"): command_dice_adjudicate,
         ("dice", "roll"): command_dice_roll,
         ("state", "get"): command_state_get,
         ("state", "set"): command_state_set,
@@ -9154,6 +9660,11 @@ def error_hint(error: str) -> Optional[str]:
         "invalid_entity_type": "Entity type must be one of: pc, npc, faction, location.",
         "invalid_travel_pc_ids": "Use pc_ids as an array of non-empty player IDs.",
         "invalid_hp_bounds": "Set max_hp above 0 and current_hp between 0 and max_hp.",
+        "invalid_roll_policy_mode": "Use roll policy mode: warn or strict.",
+        "invalid_roll_policy_decision": "Use roll decision: roll_required, no_roll, use_passive, auto_success_with_cost, deterministic_world_update.",
+        "invalid_roll_adjudication_payload": "Pass adjudication as an object or omit it.",
+        "roll_adjudication_required": "Run `dmctl dice adjudicate` first for non-combat rolls in strict mode.",
+        "roll_policy_violation": "This roll conflicts with roll necessity policy; provide override_reason only for exceptional cases.",
         "unknown_player_command": "Use `dmctl player <sheet|items|locations|rumors|quests|time>`.",
         "forbidden_player_option": "Player commands block DM/debug flags: --include-hidden, --profile, --full, --path.",
         "forbidden_player_payload_key": "Player commands block DM/debug payload keys: include_hidden, profile, full, path.",
@@ -9191,6 +9702,11 @@ def error_message(error: str) -> str:
         "invalid_entity_type": "Entity type value is invalid.",
         "invalid_travel_pc_ids": "Travel pc_ids value is invalid.",
         "invalid_hp_bounds": "Current HP must be between zero and max HP.",
+        "invalid_roll_policy_mode": "Roll policy mode value is invalid.",
+        "invalid_roll_policy_decision": "Roll policy decision value is invalid.",
+        "invalid_roll_adjudication_payload": "Roll adjudication payload is invalid.",
+        "roll_adjudication_required": "Roll adjudication is required before this roll.",
+        "roll_policy_violation": "Roll request violated roll necessity policy.",
         "unknown_player_command": "Player command is not recognized.",
         "forbidden_player_option": "Player command used a blocked option.",
         "forbidden_player_payload_key": "Player command used a blocked payload key.",

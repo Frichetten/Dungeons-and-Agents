@@ -362,6 +362,12 @@ CREATE TABLE IF NOT EXISTS roll_log (
     total INTEGER NOT NULL,
     context TEXT NOT NULL DEFAULT '',
     advantage_state TEXT NOT NULL DEFAULT 'none' CHECK(advantage_state IN ('none', 'advantage', 'disadvantage')),
+    adjudication_id TEXT NOT NULL DEFAULT '',
+    policy_decision TEXT NOT NULL DEFAULT '',
+    policy_mode TEXT NOT NULL DEFAULT 'warn' CHECK(policy_mode IN ('warn', 'strict')),
+    strict_violation INTEGER NOT NULL DEFAULT 0 CHECK(strict_violation IN (0, 1)),
+    override_reason TEXT NOT NULL DEFAULT '',
+    reason_codes_json TEXT NOT NULL DEFAULT '[]',
     created_at TEXT NOT NULL
 );
 

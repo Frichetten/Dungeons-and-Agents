@@ -57,6 +57,15 @@ Run `./tools/dmctl --help` for the full surface. Main groups:
 - `validate`
 - `world`
 
+## Roll policy v1
+
+Non-combat rolls are now meaningful-stakes-only.
+
+- Use `dmctl dice adjudicate` before non-combat rolls.
+- Prefer non-roll resolutions (`no_roll`, `use_passive`, `auto_success_with_cost`, `deterministic_world_update`) for trivial/background uncertainty.
+- Use `dmctl dice roll` with `override_reason` only for exceptional policy overrides.
+- Review roll-policy metrics in `dmctl ooc dashboard` and validation output.
+
 ## Tests
 
 ```bash

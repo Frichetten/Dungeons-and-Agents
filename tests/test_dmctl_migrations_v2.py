@@ -23,6 +23,7 @@ class TestDMCTLMigrationsV2(unittest.TestCase):
                 "003_engagement_rewards.sql",
                 "004_player_views.sql",
                 "005_npc_full_stat_blocks.sql",
+                "006_roll_policy_v1.sql",
             ],
         )
 
@@ -45,6 +46,8 @@ class TestDMCTLMigrationsV2(unittest.TestCase):
             "CREATE TABLE IF NOT EXISTS npcs",
             "char_class TEXT NOT NULL DEFAULT ''",
             "prepared_spells_json TEXT NOT NULL DEFAULT '[]'",
+            "policy_decision TEXT NOT NULL DEFAULT ''",
+            "reason_codes_json TEXT NOT NULL DEFAULT '[]'",
         ]:
             self.assertIn(token, sql)
 
