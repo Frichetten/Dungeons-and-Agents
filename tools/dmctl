@@ -25,7 +25,7 @@ from dm.ui_contract import (
     validate_envelope_or_raise,
 )
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 SQLITE_BUSY_TIMEOUT_MS = 5000
 
 CALENDAR_MONTHS = [
@@ -71,6 +71,30 @@ ENTITY_ID_TABLES = {
     "faction": "factions",
     "location": "locations",
 }
+PLAYER_ACTION_ALIASES = {
+    "sheet": "sheet",
+    "items": "items",
+    "inventory": "items",
+    "locations": "locations",
+    "map": "locations",
+    "rumors": "rumors",
+    "quests": "quests",
+    "time": "time",
+}
+PLAYER_FORBIDDEN_ARG_OPTIONS = (
+    "--include-hidden",
+    "--profile",
+    "--full",
+    "--path",
+)
+PLAYER_FORBIDDEN_PAYLOAD_KEYS = frozenset(
+    {
+        "include_hidden",
+        "profile",
+        "full",
+        "path",
+    }
+)
 
 
 class DMError(Exception):
@@ -670,6 +694,96 @@ def ensure_location(
         (loc_id, campaign_id, location_name, region, description),
     )
     return loc_id
+
+
+def upsert_location_discovery(
+    conn: sqlite3.Connection,
+    campaign_id: str,
+    pc_id: Optional[str],
+    location_id: Optional[str],
+    *,
+    source: str = "",
+) -> None:
+    normalized_pc_id = str(pc_id or "").strip()
+    normalized_location_id = str(location_id or "").strip()
+    if not normalized_pc_id or not normalized_location_id:
+        return
+    conn.execute(
+        """
+        INSERT INTO location_discoveries (id, campaign_id, pc_id, location_id, discovered_at, source)
+        VALUES (?, ?, ?, ?, ?, ?)
+        ON CONFLICT(campaign_id, pc_id, location_id) DO NOTHING
+        """,
+        (
+            uuid_id("locdisc"),
+            campaign_id,
+            normalized_pc_id,
+            normalized_location_id,
+            now_iso(),
+            str(source or ""),
+        ),
+    )
+
+
+def normalize_player_action(action: Optional[str]) -> str:
+    normalized = PLAYER_ACTION_ALIASES.get(str(action or "").strip().lower())
+    if normalized is None:
+        raise DMError(
+            "unknown_player_command",
+            {"action": action, "allowed": sorted(PLAYER_ACTION_ALIASES.keys())},
+        )
+    return normalized
+
+
+def ensure_player_safe_options(args: argparse.Namespace, payload: Dict[str, Any]) -> None:
+    option_values = {
+        "--include-hidden": bool(getattr(args, "include_hidden", False)),
+        "--profile": bool(getattr(args, "profile", None)),
+        "--full": bool(getattr(args, "full", False)),
+        "--path": bool(getattr(args, "path", None)),
+    }
+    blocked_options = [option for option in PLAYER_FORBIDDEN_ARG_OPTIONS if option_values.get(option, False)]
+    if blocked_options:
+        raise DMError("forbidden_player_option", {"blocked": blocked_options})
+
+    blocked_payload_keys = sorted(key for key in payload.keys() if key in PLAYER_FORBIDDEN_PAYLOAD_KEYS)
+    if blocked_payload_keys:
+        raise DMError("forbidden_player_payload_key", {"blocked": blocked_payload_keys})
+
+
+def resolve_player_pc_id(
+    conn: sqlite3.Connection,
+    campaign_id: str,
+    *,
+    requested_pc_id: Optional[str] = None,
+) -> str:
+    normalized_pc_id = str(requested_pc_id or "").strip()
+    if normalized_pc_id:
+        row = conn.execute(
+            "SELECT id FROM player_characters WHERE campaign_id = ? AND id = ? AND is_active = 1",
+            (campaign_id, normalized_pc_id),
+        ).fetchone()
+        if row is None:
+            raise DMError(
+                "player_not_found",
+                {"campaign": campaign_id, "pc_id": normalized_pc_id, "active_required": True},
+            )
+        return normalized_pc_id
+
+    active_rows = to_jsonable(
+        conn.execute(
+            "SELECT id FROM player_characters WHERE campaign_id = ? AND is_active = 1 ORDER BY id",
+            (campaign_id,),
+        )
+    )
+    if len(active_rows) == 1:
+        return str(active_rows[0]["id"])
+    if len(active_rows) > 1:
+        raise DMError(
+            "player_context_ambiguous",
+            {"campaign": campaign_id, "active_pc_ids": [str(row["id"]) for row in active_rows]},
+        )
+    raise DMError("player_context_unavailable", {"campaign": campaign_id, "active_pc_count": 0})
 
 
 def ensure_item(
@@ -3844,6 +3958,13 @@ def upsert_player_character(conn: sqlite3.Connection, campaign_id: str, pc: Dict
             payload,
         )
 
+    upsert_location_discovery(
+        conn,
+        campaign_id,
+        str(payload["id"]),
+        payload.get("location_id"),
+        source="pc_upsert",
+    )
     return payload
 
 
@@ -6227,6 +6348,15 @@ def command_travel_resolve(args: argparse.Namespace, payload: Dict[str, Any]) ->
             (destination_id, now_iso(), campaign_id),
         )
 
+    for traveler in travelers:
+        upsert_location_discovery(
+            conn,
+            campaign_id,
+            str(traveler.get("id", "")),
+            str(destination_id),
+            source="travel_resolve",
+        )
+
     consumed_rations = 0
     ration_shortages = 0
     shortage_pc_ids: List[str] = []
@@ -6907,6 +7037,172 @@ def command_ooc_refresh(args: argparse.Namespace, payload: Dict[str, Any]) -> Tu
         "warnings": warnings,
     }
     return (refresh_data, warnings)
+
+
+def command_player(args: argparse.Namespace, payload: Dict[str, Any]) -> Tuple[Dict[str, Any], List[str]]:
+    campaign_id = require_campaign(args.campaign)
+    action = normalize_player_action(args.action)
+    ensure_player_safe_options(args, payload)
+    conn = connect_campaign_db(campaign_id)
+
+    def player_response(data: Dict[str, Any]) -> Tuple[Dict[str, Any], List[str]]:
+        return (
+            attach_ui_envelope(data, build_ooc_panel_envelope(action, data)),
+            [],
+        )
+
+    try:
+        if action == "sheet":
+            pc_id = resolve_player_pc_id(
+                conn,
+                campaign_id,
+                requested_pc_id=str(args.pc_id or payload.get("pc_id") or ""),
+            )
+            pc = conn.execute(
+                """
+                SELECT
+                    pc.id, pc.name, pc.char_class, pc.level, pc.current_hp, pc.max_hp, pc.ac,
+                    pc.conditions_json, pc.exhaustion, pc.hit_dice_total, pc.hit_dice_used,
+                    pc.death_saves_success, pc.death_saves_fail, pc.spell_slots_json,
+                    pc.prepared_spells_json, pc.concentration_spell, pc.money_cp,
+                    pc.xp_total, pc.inspiration, pc.location_id, l.name AS location_name
+                FROM player_characters pc
+                LEFT JOIN locations l ON l.id = pc.location_id
+                WHERE pc.campaign_id = ? AND pc.id = ? AND pc.is_active = 1
+                """,
+                (campaign_id, pc_id),
+            ).fetchone()
+            if pc is None:
+                raise DMError("player_not_found", {"campaign": campaign_id, "pc_id": pc_id, "active_required": True})
+            inventory = to_jsonable(
+                conn.execute(
+                    """
+                    SELECT i.quantity, it.id AS item_id, it.name AS item_name
+                    FROM inventories i
+                    JOIN items it ON it.id = i.item_id
+                    WHERE i.campaign_id = ? AND i.owner_type = 'pc' AND i.owner_id = ?
+                    ORDER BY it.name
+                    """,
+                    (campaign_id, pc_id),
+                )
+            )
+            return player_response({"profile": "player", "pc": as_dict(pc), "inventory": inventory})
+
+        if action == "items":
+            pc_id = resolve_player_pc_id(
+                conn,
+                campaign_id,
+                requested_pc_id=str(args.pc_id or payload.get("pc_id") or ""),
+            )
+            rows = to_jsonable(
+                conn.execute(
+                    """
+                    SELECT i.owner_type, i.owner_id, i.quantity, it.id AS item_id, it.name AS item_name
+                    FROM inventories i
+                    JOIN items it ON it.id = i.item_id
+                    WHERE i.campaign_id = ?
+                      AND (
+                        (i.owner_type = 'pc' AND i.owner_id = ?)
+                        OR (i.owner_type = 'party' AND i.owner_id = 'party')
+                      )
+                    ORDER BY
+                        CASE i.owner_type WHEN 'pc' THEN 0 ELSE 1 END,
+                        it.name
+                    """,
+                    (campaign_id, pc_id),
+                )
+            )
+            return player_response({"profile": "player", "pc_id": pc_id, "items": rows, "inventory": rows})
+
+        if action == "locations":
+            pc_id = resolve_player_pc_id(
+                conn,
+                campaign_id,
+                requested_pc_id=str(args.pc_id or payload.get("pc_id") or ""),
+            )
+            pc_row = conn.execute(
+                "SELECT location_id FROM player_characters WHERE campaign_id = ? AND id = ? AND is_active = 1",
+                (campaign_id, pc_id),
+            ).fetchone()
+            if pc_row is None:
+                raise DMError("player_not_found", {"campaign": campaign_id, "pc_id": pc_id, "active_required": True})
+            current_location_id = str(pc_row["location_id"] or "")
+            rows = to_jsonable(
+                conn.execute(
+                    """
+                    SELECT l.id, l.name, l.region, ld.discovered_at
+                    FROM location_discoveries ld
+                    JOIN locations l ON l.id = ld.location_id AND l.campaign_id = ld.campaign_id
+                    WHERE ld.campaign_id = ? AND ld.pc_id = ?
+                    ORDER BY
+                        CASE WHEN l.id = ? THEN 0 ELSE 1 END,
+                        ld.discovered_at DESC,
+                        l.name
+                    """,
+                    (campaign_id, pc_id, current_location_id),
+                )
+            )
+            locations = []
+            for row in rows:
+                locations.append(
+                    {
+                        "id": row.get("id"),
+                        "name": row.get("name"),
+                        "region": row.get("region"),
+                        "is_current": str(row.get("id", "")) == current_location_id,
+                        "discovered_at": row.get("discovered_at"),
+                    }
+                )
+            return player_response(
+                {
+                    "profile": "player",
+                    "pc_id": pc_id,
+                    "current_location_id": current_location_id,
+                    "locations": locations,
+                }
+            )
+
+        if action == "rumors":
+            raw_limit = args.limit if args.limit is not None else payload.get("limit", 20)
+            limit = max(1, min(100, safe_int(raw_limit, "limit")))
+            rows = to_jsonable(
+                conn.execute(
+                    """
+                    SELECT id, text, source, spread_level, updated_at
+                    FROM rumors
+                    WHERE campaign_id = ? AND revealed_to_player = 1
+                    ORDER BY updated_at DESC
+                    LIMIT ?
+                    """,
+                    (campaign_id, limit),
+                )
+            )
+            return player_response({"profile": "player", "limit": limit, "rumors": rows})
+
+        if action == "quests":
+            rows = to_jsonable(
+                conn.execute(
+                    "SELECT id, title, status, updated_at FROM quests WHERE campaign_id = ? ORDER BY updated_at DESC",
+                    (campaign_id,),
+                )
+            )
+            return player_response({"profile": "player", "quests": rows})
+
+        if action == "time":
+            row = conn.execute(
+                """
+                SELECT ws.world_date, ws.world_time, ws.weather, ws.region, ws.location_id, l.name AS location_name
+                FROM world_state ws
+                LEFT JOIN locations l ON l.id = ws.location_id
+                WHERE ws.campaign_id = ?
+                """,
+                (campaign_id,),
+            ).fetchone()
+            return player_response({"profile": "player", "time": as_dict(row)})
+    finally:
+        conn.close()
+
+    raise DMError("unknown_player_command", {"action": action, "allowed": sorted(PLAYER_ACTION_ALIASES.keys())})
 
 
 def command_ooc(args: argparse.Namespace, payload: Dict[str, Any]) -> Tuple[Dict[str, Any], List[str]]:
@@ -8377,6 +8673,14 @@ def command_map() -> Dict[Tuple[str, str], Any]:
         ("ooc", "savepoint"): command_ooc,
         ("ooc", "undo_last_turn"): command_ooc,
         ("ooc", "dashboard"): command_ooc,
+        ("player", "sheet"): command_player,
+        ("player", "items"): command_player,
+        ("player", "inventory"): command_player,
+        ("player", "locations"): command_player,
+        ("player", "map"): command_player,
+        ("player", "rumors"): command_player,
+        ("player", "quests"): command_player,
+        ("player", "time"): command_player,
         ("combat", "start"): command_combat_start,
         ("combat", "act"): command_combat_act,
         ("combat", "resolve"): command_combat_resolve,
@@ -8401,6 +8705,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--formula")
     parser.add_argument("--context")
     parser.add_argument("--path")
+    parser.add_argument("--pc-id")
+    parser.add_argument("--limit", type=int)
     parser.add_argument("--profile")
     parser.add_argument("--include-hidden", action="store_true")
     parser.add_argument("--full", action="store_true")
@@ -8431,6 +8737,8 @@ def build_help_payload(group: Optional[str], action: Optional[str]) -> Dict[str,
             "--formula",
             "--context",
             "--path",
+            "--pc-id",
+            "--limit",
             "--profile",
             "--include-hidden",
             "--full",
@@ -8449,6 +8757,7 @@ def build_help_payload(group: Optional[str], action: Optional[str]) -> Dict[str,
             "dmctl campaign repair-events --campaign demo --dry-run",
             "dmctl turn begin --campaign demo",
             "dmctl state get --campaign demo --path world_state,players",
+            "dmctl player sheet --campaign demo",
             "dmctl validate --campaign demo",
         ],
     }
@@ -8476,6 +8785,8 @@ def infer_help_scope(raw_args: Sequence[str]) -> Tuple[Optional[str], Optional[s
         "--formula",
         "--context",
         "--path",
+        "--pc-id",
+        "--limit",
         "--profile",
         "--keep-highest",
         "--keep-lowest",
@@ -8567,6 +8878,11 @@ def error_hint(error: str) -> Optional[str]:
         "invalid_relationship_type": "Relationship endpoint types must be one of: pc, npc, faction, location.",
         "invalid_entity_type": "Entity type must be one of: pc, npc, faction, location.",
         "invalid_travel_pc_ids": "Use pc_ids as an array of non-empty player IDs.",
+        "unknown_player_command": "Use `dmctl player <sheet|items|locations|rumors|quests|time>`.",
+        "forbidden_player_option": "Player commands block DM/debug flags: --include-hidden, --profile, --full, --path.",
+        "forbidden_player_payload_key": "Player commands block DM/debug payload keys: include_hidden, profile, full, path.",
+        "player_context_ambiguous": "Provide --pc-id when more than one active player character exists.",
+        "player_context_unavailable": "Set one active player character before running player commands.",
     }
     return hints.get(error)
 
@@ -8598,6 +8914,11 @@ def error_message(error: str) -> str:
         "invalid_relationship_type": "Relationship type value is invalid.",
         "invalid_entity_type": "Entity type value is invalid.",
         "invalid_travel_pc_ids": "Travel pc_ids value is invalid.",
+        "unknown_player_command": "Player command is not recognized.",
+        "forbidden_player_option": "Player command used a blocked option.",
+        "forbidden_player_payload_key": "Player command used a blocked payload key.",
+        "player_context_ambiguous": "Player context is ambiguous.",
+        "player_context_unavailable": "No active player context is available.",
     }
     return mapping.get(error, error.replace("_", " "))
 

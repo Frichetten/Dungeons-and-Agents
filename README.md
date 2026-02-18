@@ -32,6 +32,8 @@ Persistent local D&D 5e campaign engine with SQLite, migration-driven schema upg
 - `dmctl spell end`
 - `dmctl combat resolve`
 - `dmctl ooc <recap|refresh|sheet|inventory|quests|rumors|npcs|relationships|factions|time|map|state|savepoint|undo_last_turn|dashboard>`
+- `dmctl player <sheet|items|inventory|locations|map|rumors|quests|time>`
+- `pcctl <sheet|items|inventory|locations|map|rumors|quests|time>` (player-safe wrapper)
 
 All commands return JSON only.
 
@@ -41,6 +43,7 @@ All commands return JSON only.
 - Use `--full` to request the legacy verbose payload for debugging or tooling compatibility.
 - Use `state get --path <key>` (or comma-separated keys) to fetch only the state slices you need.
 - `/recap` is player-facing momentum recap; `/refresh` is DM continuity rehydration that rebuilds memory context from persisted state.
+- Player-facing CLI lookups should use `dmctl player ...` (or `pcctl ...`) to enforce safe field projections.
 
 ## Run
 
