@@ -5,7 +5,7 @@ CREATE TABLE IF NOT EXISTS schema_meta (
     value TEXT NOT NULL
 );
 
-INSERT OR IGNORE INTO schema_meta (key, value) VALUES ('schema_version', '4');
+INSERT OR IGNORE INTO schema_meta (key, value) VALUES ('schema_version', '5');
 
 CREATE TABLE IF NOT EXISTS applied_migrations (
     version INTEGER PRIMARY KEY,
@@ -19,7 +19,7 @@ CREATE TABLE IF NOT EXISTS campaigns (
     status TEXT NOT NULL DEFAULT 'active',
     created_at TEXT NOT NULL,
     last_played_at TEXT NOT NULL,
-    schema_version INTEGER NOT NULL DEFAULT 4,
+    schema_version INTEGER NOT NULL DEFAULT 5,
     current_scene TEXT NOT NULL DEFAULT '',
     main_arc TEXT NOT NULL DEFAULT '',
     side_arcs_json TEXT NOT NULL DEFAULT '[]'
@@ -134,6 +134,8 @@ CREATE TABLE IF NOT EXISTS npcs (
     id TEXT PRIMARY KEY,
     campaign_id TEXT NOT NULL REFERENCES campaigns(id) ON DELETE CASCADE,
     name TEXT NOT NULL,
+    char_class TEXT NOT NULL DEFAULT '',
+    level INTEGER NOT NULL DEFAULT 1 CHECK(level >= 1),
     title TEXT NOT NULL DEFAULT '',
     faction_id TEXT REFERENCES factions(id) ON DELETE SET NULL,
     location_id TEXT REFERENCES locations(id) ON DELETE SET NULL,
@@ -141,6 +143,17 @@ CREATE TABLE IF NOT EXISTS npcs (
     current_hp INTEGER NOT NULL DEFAULT 10 CHECK(current_hp >= 0 AND current_hp <= max_hp),
     ac INTEGER NOT NULL DEFAULT 10 CHECK(ac >= 0),
     conditions_json TEXT NOT NULL DEFAULT '[]',
+    exhaustion INTEGER NOT NULL DEFAULT 0 CHECK(exhaustion >= 0 AND exhaustion <= 6),
+    hit_dice_total INTEGER NOT NULL DEFAULT 1 CHECK(hit_dice_total >= 0),
+    hit_dice_used INTEGER NOT NULL DEFAULT 0 CHECK(hit_dice_used >= 0 AND hit_dice_used <= hit_dice_total),
+    death_saves_success INTEGER NOT NULL DEFAULT 0 CHECK(death_saves_success >= 0 AND death_saves_success <= 3),
+    death_saves_fail INTEGER NOT NULL DEFAULT 0 CHECK(death_saves_fail >= 0 AND death_saves_fail <= 3),
+    spell_slots_json TEXT NOT NULL DEFAULT '{}',
+    prepared_spells_json TEXT NOT NULL DEFAULT '[]',
+    concentration_spell TEXT NOT NULL DEFAULT '',
+    consumables_json TEXT NOT NULL DEFAULT '{}',
+    xp_total INTEGER NOT NULL DEFAULT 0 CHECK(xp_total >= 0),
+    inspiration INTEGER NOT NULL DEFAULT 0 CHECK(inspiration IN (0, 1)),
     trust INTEGER NOT NULL DEFAULT 0,
     fear INTEGER NOT NULL DEFAULT 0,
     debt INTEGER NOT NULL DEFAULT 0,

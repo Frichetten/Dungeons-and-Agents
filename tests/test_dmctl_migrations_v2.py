@@ -22,6 +22,7 @@ class TestDMCTLMigrationsV2(unittest.TestCase):
                 "002_reliability_core.sql",
                 "003_engagement_rewards.sql",
                 "004_player_views.sql",
+                "005_npc_full_stat_blocks.sql",
             ],
         )
 
@@ -41,6 +42,9 @@ class TestDMCTLMigrationsV2(unittest.TestCase):
             "xp_total INTEGER NOT NULL DEFAULT 0",
             "reward_json TEXT NOT NULL DEFAULT '{}'",
             "CREATE TABLE IF NOT EXISTS location_discoveries",
+            "CREATE TABLE IF NOT EXISTS npcs",
+            "char_class TEXT NOT NULL DEFAULT ''",
+            "prepared_spells_json TEXT NOT NULL DEFAULT '[]'",
         ]:
             self.assertIn(token, sql)
 

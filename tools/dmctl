@@ -25,7 +25,7 @@ from dm.ui_contract import (
     validate_envelope_or_raise,
 )
 
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 SQLITE_BUSY_TIMEOUT_MS = 5000
 
 CALENDAR_MONTHS = [
@@ -1323,7 +1323,15 @@ def snapshot_from_db(conn: sqlite3.Connection, campaign_id: str) -> Dict[str, An
     )
     npcs = to_jsonable(
         conn.execute(
-            "SELECT id, name, trust, fear, debt, reputation, location_id FROM npcs WHERE campaign_id = ?",
+            """
+            SELECT id, name, char_class, level, max_hp, current_hp, ac, conditions_json,
+                   exhaustion, hit_dice_total, hit_dice_used, death_saves_success,
+                   death_saves_fail, spell_slots_json, prepared_spells_json,
+                   concentration_spell, consumables_json, xp_total, inspiration,
+                   trust, fear, debt, reputation, location_id
+            FROM npcs
+            WHERE campaign_id = ?
+            """,
             (campaign_id,),
         )
     )
@@ -1910,8 +1918,11 @@ def load_turn_diff_state(conn: sqlite3.Connection, campaign_id: str) -> Dict[str
     npcs = to_jsonable(
         conn.execute(
             """
-            SELECT id, name, current_hp, max_hp, trust, fear, debt, reputation,
-                   conditions_json, location_id
+            SELECT id, name, char_class, level, current_hp, max_hp, ac, conditions_json,
+                   exhaustion, hit_dice_total, hit_dice_used, death_saves_success,
+                   death_saves_fail, spell_slots_json, prepared_spells_json,
+                   concentration_spell, consumables_json, xp_total, inspiration,
+                   trust, fear, debt, reputation, location_id
             FROM npcs
             WHERE campaign_id = ?
             """,
@@ -2076,7 +2087,24 @@ def build_turn_diff(before: Dict[str, Any], after: Dict[str, Any]) -> Dict[str, 
         diff_records(
             npc_before,
             npc_after,
-            ["current_hp", "max_hp", "conditions_json"],
+            [
+                "level",
+                "current_hp",
+                "max_hp",
+                "ac",
+                "conditions_json",
+                "exhaustion",
+                "hit_dice_total",
+                "hit_dice_used",
+                "death_saves_success",
+                "death_saves_fail",
+                "spell_slots_json",
+                "prepared_spells_json",
+                "concentration_spell",
+                "consumables_json",
+                "xp_total",
+                "inspiration",
+            ],
             "npc_id",
         )
     )
@@ -2324,6 +2352,11 @@ def set_concentration_for_caster(
             "UPDATE player_characters SET concentration_spell = ?, updated_at = ? WHERE id = ?",
             (spell_name, ts, caster_id),
         )
+    elif caster_type == "npc":
+        conn.execute(
+            "UPDATE npcs SET concentration_spell = ?, updated_at = ? WHERE id = ?",
+            (spell_name, ts, caster_id),
+        )
     elif caster_type == "combatant":
         conn.execute(
             "UPDATE combatants SET concentration_spell = ? WHERE id = ?",
@@ -2336,6 +2369,11 @@ def clear_concentration_for_caster(conn: sqlite3.Connection, caster_type: str, c
     if caster_type == "pc":
         conn.execute(
             "UPDATE player_characters SET concentration_spell = '', updated_at = ? WHERE id = ?",
+            (ts, caster_id),
+        )
+    elif caster_type == "npc":
+        conn.execute(
+            "UPDATE npcs SET concentration_spell = '', updated_at = ? WHERE id = ?",
             (ts, caster_id),
         )
     elif caster_type == "combatant":
@@ -2804,10 +2842,16 @@ def sync_combatant_to_source(conn: sqlite3.Connection, combatant: sqlite3.Row) -
         conn.execute(
             """
             UPDATE npcs
-            SET current_hp = ?, conditions_json = ?, updated_at = ?
+            SET current_hp = ?, conditions_json = ?, concentration_spell = ?, updated_at = ?
             WHERE id = ?
             """,
-            (combatant["current_hp"], combatant["conditions_json"], now_iso(), source_id),
+            (
+                combatant["current_hp"],
+                combatant["conditions_json"],
+                combatant["concentration_spell"],
+                now_iso(),
+                source_id,
+            ),
         )
 
 
@@ -3251,12 +3295,16 @@ def command_campaign_seed(args: argparse.Namespace, payload: Dict[str, Any]) -> 
         conn.execute(
             """
             INSERT INTO npcs (
-                id, campaign_id, name, title, faction_id, location_id, max_hp, current_hp,
-                ac, conditions_json, trust, fear, debt, reputation, initiative_mod,
+                id, campaign_id, name, char_class, level, title, faction_id, location_id, max_hp, current_hp,
+                ac, conditions_json, exhaustion, hit_dice_total, hit_dice_used, death_saves_success,
+                death_saves_fail, spell_slots_json, prepared_spells_json, concentration_spell,
+                consumables_json, xp_total, inspiration, trust, fear, debt, reputation, initiative_mod,
                 notes_public, notes_hidden, created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(id) DO UPDATE SET
                 name = excluded.name,
+                char_class = excluded.char_class,
+                level = excluded.level,
                 title = excluded.title,
                 faction_id = excluded.faction_id,
                 location_id = excluded.location_id,
@@ -3264,6 +3312,17 @@ def command_campaign_seed(args: argparse.Namespace, payload: Dict[str, Any]) -> 
                 current_hp = excluded.current_hp,
                 ac = excluded.ac,
                 conditions_json = excluded.conditions_json,
+                exhaustion = excluded.exhaustion,
+                hit_dice_total = excluded.hit_dice_total,
+                hit_dice_used = excluded.hit_dice_used,
+                death_saves_success = excluded.death_saves_success,
+                death_saves_fail = excluded.death_saves_fail,
+                spell_slots_json = excluded.spell_slots_json,
+                prepared_spells_json = excluded.prepared_spells_json,
+                concentration_spell = excluded.concentration_spell,
+                consumables_json = excluded.consumables_json,
+                xp_total = excluded.xp_total,
+                inspiration = excluded.inspiration,
                 trust = excluded.trust,
                 fear = excluded.fear,
                 debt = excluded.debt,
@@ -3277,6 +3336,8 @@ def command_campaign_seed(args: argparse.Namespace, payload: Dict[str, Any]) -> 
                 npc_id,
                 campaign_id,
                 str(npc["name"]),
+                str(npc.get("char_class", npc.get("class", ""))),
+                safe_int(npc.get("level", 1), "level"),
                 str(npc.get("title", "")),
                 npc.get("faction_id"),
                 location_id,
@@ -3284,6 +3345,17 @@ def command_campaign_seed(args: argparse.Namespace, payload: Dict[str, Any]) -> 
                 current_hp,
                 safe_int(npc.get("ac", 10), "ac"),
                 json.dumps(npc.get("conditions", []), separators=(",", ":")),
+                safe_int(npc.get("exhaustion", 0), "exhaustion"),
+                safe_int(npc.get("hit_dice_total", 1), "hit_dice_total"),
+                safe_int(npc.get("hit_dice_used", 0), "hit_dice_used"),
+                safe_int(npc.get("death_saves_success", 0), "death_saves_success"),
+                safe_int(npc.get("death_saves_fail", 0), "death_saves_fail"),
+                json.dumps(npc.get("spell_slots", {}), separators=(",", ":")),
+                json.dumps(npc.get("prepared_spells", []), separators=(",", ":")),
+                str(npc.get("concentration_spell", "")),
+                json.dumps(npc.get("consumables", {}), separators=(",", ":")),
+                max(0, safe_int(npc.get("xp_total", 0), "xp_total")),
+                1 if safe_int(npc.get("inspiration", 0), "inspiration") > 0 else 0,
                 safe_int(npc.get("trust", 0), "trust"),
                 safe_int(npc.get("fear", 0), "fear"),
                 safe_int(npc.get("debt", 0), "debt"),
@@ -4317,15 +4389,19 @@ def command_npc_create(args: argparse.Namespace, payload: Dict[str, Any]) -> Tup
     conn.execute(
         """
         INSERT INTO npcs (
-            id, campaign_id, name, title, faction_id, location_id, max_hp, current_hp,
-            ac, conditions_json, trust, fear, debt, reputation, initiative_mod,
+            id, campaign_id, name, char_class, level, title, faction_id, location_id, max_hp, current_hp,
+            ac, conditions_json, exhaustion, hit_dice_total, hit_dice_used, death_saves_success,
+            death_saves_fail, spell_slots_json, prepared_spells_json, concentration_spell,
+            consumables_json, xp_total, inspiration, trust, fear, debt, reputation, initiative_mod,
             notes_public, notes_hidden, created_at, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             npc_id,
             campaign_id,
             str(name),
+            str(payload.get("char_class", payload.get("class", ""))),
+            safe_int(payload.get("level", 1), "level"),
             str(payload.get("title", "")),
             faction_id,
             location_id,
@@ -4333,6 +4409,17 @@ def command_npc_create(args: argparse.Namespace, payload: Dict[str, Any]) -> Tup
             current_hp,
             safe_int(payload.get("ac", 10), "ac"),
             json.dumps(payload.get("conditions", []), separators=(",", ":")),
+            safe_int(payload.get("exhaustion", 0), "exhaustion"),
+            safe_int(payload.get("hit_dice_total", 1), "hit_dice_total"),
+            safe_int(payload.get("hit_dice_used", 0), "hit_dice_used"),
+            safe_int(payload.get("death_saves_success", 0), "death_saves_success"),
+            safe_int(payload.get("death_saves_fail", 0), "death_saves_fail"),
+            json.dumps(payload.get("spell_slots", {}), separators=(",", ":")),
+            json.dumps(payload.get("prepared_spells", []), separators=(",", ":")),
+            str(payload.get("concentration_spell", "")),
+            json.dumps(payload.get("consumables", {}), separators=(",", ":")),
+            max(0, safe_int(payload.get("xp_total", 0), "xp_total")),
+            1 if safe_int(payload.get("inspiration", 0), "inspiration") > 0 else 0,
             safe_int(payload.get("trust", 0), "trust"),
             safe_int(payload.get("fear", 0), "fear"),
             safe_int(payload.get("debt", 0), "debt"),
@@ -4381,17 +4468,31 @@ def command_npc_update(args: argparse.Namespace, payload: Dict[str, Any]) -> Tup
 
     set_fields = {
         "name",
+        "char_class",
+        "level",
         "title",
         "faction_id",
         "max_hp",
         "current_hp",
         "ac",
+        "exhaustion",
+        "hit_dice_total",
+        "hit_dice_used",
+        "death_saves_success",
+        "death_saves_fail",
+        "concentration_spell",
+        "xp_total",
+        "inspiration",
         "reputation",
         "initiative_mod",
         "notes_public",
         "notes_hidden",
     }
     delta_fields = {"trust_delta": "trust", "fear_delta": "fear", "debt_delta": "debt", "reputation_delta": "reputation"}
+
+    if "class" in payload and "char_class" not in payload:
+        updates.append("char_class = ?")
+        values.append(payload["class"])
 
     for key in set_fields:
         if key in payload:
@@ -4401,6 +4502,15 @@ def command_npc_update(args: argparse.Namespace, payload: Dict[str, Any]) -> Tup
     if "conditions" in payload:
         updates.append("conditions_json = ?")
         values.append(json.dumps(payload["conditions"], separators=(",", ":")))
+    if "spell_slots" in payload:
+        updates.append("spell_slots_json = ?")
+        values.append(json.dumps(payload["spell_slots"], separators=(",", ":")))
+    if "prepared_spells" in payload:
+        updates.append("prepared_spells_json = ?")
+        values.append(json.dumps(payload["prepared_spells"], separators=(",", ":")))
+    if "consumables" in payload:
+        updates.append("consumables_json = ?")
+        values.append(json.dumps(payload["consumables"], separators=(",", ":")))
 
     if "location_name" in payload or "location_id" in payload:
         loc_id = ensure_location(
@@ -6705,26 +6815,29 @@ def command_spell_cast(args: argparse.Namespace, payload: Dict[str, Any]) -> Tup
     )
 
     slot_change = payload.get("spell_slot_change")
-    if slot_change and caster_type == "pc":
+    if slot_change and caster_type in {"pc", "npc"}:
         slot_level = str(slot_change.get("slot_level"))
         delta = safe_int(slot_change.get("delta", -1), "delta")
-        pc_row = conn.execute(
-            "SELECT spell_slots_json FROM player_characters WHERE campaign_id = ? AND id = ?",
+        caster_table = "player_characters" if caster_type == "pc" else "npcs"
+        caster_row = conn.execute(
+            f"SELECT spell_slots_json FROM {caster_table} WHERE campaign_id = ? AND id = ?",
             (campaign_id, normalized_caster_id),
         ).fetchone()
-        if pc_row is None:
-            raise DMError("player_not_found", {"pc_id": normalized_caster_id})
-        slots = json_load(pc_row["spell_slots_json"], {})
+        if caster_row is None:
+            if caster_type == "pc":
+                raise DMError("player_not_found", {"pc_id": normalized_caster_id})
+            raise DMError("npc_not_found", {"npc_id": normalized_caster_id})
+        slots = json_load(caster_row["spell_slots_json"], {})
         current = safe_int(slots.get(slot_level, 0), f"spell_slots[{slot_level}]")
         updated = current + delta
         if updated < 0:
             raise DMError(
                 "invalid_spell_slot_state",
-                {"pc_id": normalized_caster_id, "slot_level": slot_level, "current": current, "delta": delta},
+                {"caster_id": normalized_caster_id, "slot_level": slot_level, "current": current, "delta": delta},
             )
         slots[slot_level] = updated
         conn.execute(
-            "UPDATE player_characters SET spell_slots_json = ?, updated_at = ? WHERE campaign_id = ? AND id = ?",
+            f"UPDATE {caster_table} SET spell_slots_json = ?, updated_at = ? WHERE campaign_id = ? AND id = ?",
             (json.dumps(slots, separators=(",", ":")), ts, campaign_id, normalized_caster_id),
         )
 
@@ -7567,7 +7680,13 @@ def command_ooc(args: argparse.Namespace, payload: Dict[str, Any]) -> Tuple[Dict
     if action == "npcs":
         rows = to_jsonable(
             conn.execute(
-                "SELECT id, name, title, trust, fear, debt, reputation, location_id FROM npcs WHERE campaign_id = ? ORDER BY name",
+                """
+                SELECT id, name, char_class, level, title, max_hp, current_hp, ac,
+                       trust, fear, debt, reputation, location_id
+                FROM npcs
+                WHERE campaign_id = ?
+                ORDER BY name
+                """,
                 (campaign_id,),
             )
         )
@@ -7719,7 +7838,7 @@ def fetch_participant_state(
             "ac": row["ac"],
             "initiative_mod": row["initiative_mod"],
             "conditions_json": row["conditions_json"],
-            "concentration_spell": "",
+            "concentration_spell": row["concentration_spell"],
             "position": str(participant.get("position", "")),
             "cover": str(participant.get("cover", "none")),
         }
