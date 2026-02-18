@@ -5,7 +5,7 @@ CREATE TABLE IF NOT EXISTS schema_meta (
     value TEXT NOT NULL
 );
 
-INSERT OR IGNORE INTO schema_meta (key, value) VALUES ('schema_version', '3');
+INSERT OR IGNORE INTO schema_meta (key, value) VALUES ('schema_version', '4');
 
 CREATE TABLE IF NOT EXISTS applied_migrations (
     version INTEGER PRIMARY KEY,
@@ -19,7 +19,7 @@ CREATE TABLE IF NOT EXISTS campaigns (
     status TEXT NOT NULL DEFAULT 'active',
     created_at TEXT NOT NULL,
     last_played_at TEXT NOT NULL,
-    schema_version INTEGER NOT NULL DEFAULT 3,
+    schema_version INTEGER NOT NULL DEFAULT 4,
     current_scene TEXT NOT NULL DEFAULT '',
     main_arc TEXT NOT NULL DEFAULT '',
     side_arcs_json TEXT NOT NULL DEFAULT '[]'
@@ -33,6 +33,16 @@ CREATE TABLE IF NOT EXISTS locations (
     description TEXT NOT NULL DEFAULT '',
     tags_json TEXT NOT NULL DEFAULT '[]',
     UNIQUE(campaign_id, name)
+);
+
+CREATE TABLE IF NOT EXISTS location_discoveries (
+    id TEXT PRIMARY KEY,
+    campaign_id TEXT NOT NULL REFERENCES campaigns(id) ON DELETE CASCADE,
+    pc_id TEXT NOT NULL REFERENCES player_characters(id) ON DELETE CASCADE,
+    location_id TEXT NOT NULL REFERENCES locations(id) ON DELETE CASCADE,
+    discovered_at TEXT NOT NULL,
+    source TEXT NOT NULL DEFAULT '',
+    UNIQUE(campaign_id, pc_id, location_id)
 );
 
 CREATE TABLE IF NOT EXISTS travel_routes (
@@ -423,6 +433,7 @@ CREATE INDEX IF NOT EXISTS idx_events_campaign_turn ON events(campaign_id, turn_
 CREATE INDEX IF NOT EXISTS idx_events_campaign_stage ON events(campaign_id, stage);
 CREATE INDEX IF NOT EXISTS idx_roll_log_campaign_turn ON roll_log(campaign_id, turn_id);
 CREATE INDEX IF NOT EXISTS idx_inventories_owner ON inventories(campaign_id, owner_type, owner_id);
+CREATE INDEX IF NOT EXISTS idx_location_discoveries_pc_time ON location_discoveries(campaign_id, pc_id, discovered_at DESC);
 CREATE INDEX IF NOT EXISTS idx_combatants_encounter_order ON combatants(encounter_id, turn_order_index);
 CREATE INDEX IF NOT EXISTS idx_turn_diffs_campaign_turn ON turn_diffs(campaign_id, turn_id);
 CREATE INDEX IF NOT EXISTS idx_rumor_links_campaign ON rumor_links(campaign_id, rumor_id, secret_id);
