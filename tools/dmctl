@@ -618,14 +618,29 @@ def normalize_hp_state(
     payload: Dict[str, Any],
     *,
     default_max_hp: int,
+    existing_max_hp: Optional[int] = None,
+    existing_current_hp: Optional[int] = None,
     max_hp_field: str = "max_hp",
     current_hp_field: str = "current_hp",
 ) -> Tuple[int, int]:
-    raw_max_hp = payload.get(max_hp_field)
-    max_hp = safe_int(raw_max_hp, max_hp_field) if raw_max_hp is not None else default_max_hp
+    has_max_hp = max_hp_field in payload
+    has_current_hp = current_hp_field in payload
 
-    raw_current_hp = payload.get(current_hp_field)
-    current_hp = safe_int(raw_current_hp, current_hp_field) if raw_current_hp is not None else max_hp
+    if has_max_hp:
+        max_hp = safe_int(payload.get(max_hp_field), max_hp_field)
+    elif existing_max_hp is not None:
+        max_hp = safe_int(existing_max_hp, max_hp_field)
+    else:
+        max_hp = default_max_hp
+
+    if has_current_hp:
+        current_hp = safe_int(payload.get(current_hp_field), current_hp_field)
+    elif has_max_hp:
+        current_hp = max_hp
+    elif existing_current_hp is not None:
+        current_hp = safe_int(existing_current_hp, current_hp_field)
+    else:
+        current_hp = max_hp
 
     if max_hp <= 0 or current_hp < 0 or current_hp > max_hp:
         raise DMError(
@@ -3215,7 +3230,16 @@ def command_campaign_seed(args: argparse.Namespace, payload: Dict[str, Any]) -> 
         if not isinstance(npc, dict) or "name" not in npc:
             raise DMError("invalid_npc_payload", {"required": ["name"]})
         npc_id = npc.get("id") or uuid_id("npc")
-        max_hp, current_hp = normalize_hp_state(npc, default_max_hp=DEFAULT_NPC_MAX_HP)
+        existing_npc = conn.execute(
+            "SELECT max_hp, current_hp FROM npcs WHERE campaign_id = ? AND id = ?",
+            (campaign_id, npc_id),
+        ).fetchone()
+        max_hp, current_hp = normalize_hp_state(
+            npc,
+            default_max_hp=DEFAULT_NPC_MAX_HP,
+            existing_max_hp=safe_int(existing_npc["max_hp"], "max_hp") if existing_npc else None,
+            existing_current_hp=safe_int(existing_npc["current_hp"], "current_hp") if existing_npc else None,
+        )
         location_id = ensure_location(
             conn,
             campaign_id,
@@ -3980,8 +4004,6 @@ def upsert_player_character(conn: sqlite3.Connection, campaign_id: str, pc: Dict
     if "id" not in pc or "name" not in pc:
         raise DMError("invalid_player_character", {"required": ["id", "name"]})
 
-    max_hp, current_hp = normalize_hp_state(pc, default_max_hp=DEFAULT_PC_MAX_HP)
-
     ts = now_iso()
     location_id = ensure_location(
         conn,
@@ -3993,9 +4015,15 @@ def upsert_player_character(conn: sqlite3.Connection, campaign_id: str, pc: Dict
     )
 
     existing = conn.execute(
-        "SELECT id FROM player_characters WHERE campaign_id = ? AND id = ?",
+        "SELECT id, max_hp, current_hp FROM player_characters WHERE campaign_id = ? AND id = ?",
         (campaign_id, pc["id"]),
     ).fetchone()
+    max_hp, current_hp = normalize_hp_state(
+        pc,
+        default_max_hp=DEFAULT_PC_MAX_HP,
+        existing_max_hp=safe_int(existing["max_hp"], "max_hp") if existing else None,
+        existing_current_hp=safe_int(existing["current_hp"], "current_hp") if existing else None,
+    )
 
     payload = {
         "id": pc["id"],

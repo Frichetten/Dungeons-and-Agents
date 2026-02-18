@@ -830,6 +830,56 @@ class TestDMCTLFeaturesV2(unittest.TestCase):
         self.assertEqual(created["data"]["npc"]["current_hp"], 10)
         run_dmctl("turn", "commit", "--campaign", self.campaign_id, "--summary", "Create npc defaults")
 
+    def test_21_state_set_current_hp_only_preserves_existing_pc_max_hp(self):
+        run_dmctl("turn", "begin", "--campaign", self.campaign_id)
+        run_dmctl(
+            "state",
+            "set",
+            "--campaign",
+            self.campaign_id,
+            payload={"player_characters": [{"id": "pc_hero", "name": "Arin Vale", "current_hp": 9}]},
+        )
+        run_dmctl("turn", "commit", "--campaign", self.campaign_id, "--summary", "PC hp-only update")
+
+        players = run_dmctl("state", "get", "--campaign", self.campaign_id, "--path", "players")["data"]["value"]
+        pc = next(row for row in players if row["id"] == "pc_hero")
+        self.assertEqual(pc["max_hp"], 24)
+        self.assertEqual(pc["current_hp"], 9)
+
+    def test_22_campaign_seed_current_hp_only_preserves_existing_npc_max_hp(self):
+        run_dmctl("turn", "begin", "--campaign", self.campaign_id)
+        run_dmctl(
+            "npc",
+            "create",
+            "--campaign",
+            self.campaign_id,
+            payload={
+                "id": "npc_seed_preserve_hp",
+                "name": "Seed Preserve HP",
+                "location_id": "loc_start",
+                "max_hp": 18,
+                "current_hp": 18,
+            },
+        )
+        run_dmctl("turn", "commit", "--campaign", self.campaign_id, "--summary", "Create npc preserve baseline")
+
+        run_dmctl("turn", "begin", "--campaign", self.campaign_id)
+        run_dmctl(
+            "campaign",
+            "seed",
+            "--campaign",
+            self.campaign_id,
+            payload={
+                "npcs": [{"id": "npc_seed_preserve_hp", "name": "Seed Preserve HP", "current_hp": 7, "location_id": "loc_start"}]
+            },
+        )
+        run_dmctl("turn", "commit", "--campaign", self.campaign_id, "--summary", "Seed npc hp-only update")
+
+        npcs = run_dmctl("state", "get", "--campaign", self.campaign_id, "--path", "npcs")["data"]["value"]
+        npc = next(row for row in npcs if row["id"] == "npc_seed_preserve_hp")
+        self.assertEqual(npc["max_hp"], 18)
+        self.assertEqual(npc["current_hp"], 7)
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
