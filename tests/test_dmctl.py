@@ -230,6 +230,29 @@ class TestDMCTLQualityGates(unittest.TestCase):
             },
         )
         self.assertEqual(enemy["data"]["npc"]["id"], "npc_raider")
+        self.assertEqual(enemy["data"]["npc"]["level"], 1)
+        self.assertEqual(enemy["data"]["npc"]["char_class"], "")
+        self.assertEqual(enemy["data"]["npc"]["spell_slots_json"], "{}")
+
+        updated_enemy = run_dmctl(
+            "npc",
+            "update",
+            "--campaign",
+            self.campaign_id,
+            payload={
+                "npc_id": "npc_raider",
+                "class": "Fighter",
+                "level": 2,
+                "spell_slots": {"1": 2},
+                "concentration_spell": "Bless",
+                "inspiration": 1,
+            },
+        )
+        self.assertEqual(updated_enemy["data"]["npc"]["char_class"], "Fighter")
+        self.assertEqual(updated_enemy["data"]["npc"]["level"], 2)
+        self.assertEqual(updated_enemy["data"]["npc"]["spell_slots_json"], '{"1":2}')
+        self.assertEqual(updated_enemy["data"]["npc"]["concentration_spell"], "Bless")
+        self.assertEqual(updated_enemy["data"]["npc"]["inspiration"], 1)
 
         started = run_dmctl(
             "combat",

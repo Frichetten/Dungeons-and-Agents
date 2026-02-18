@@ -118,11 +118,12 @@ class TestDMCTLReliabilityV2(unittest.TestCase):
         applied = [r["name"] for r in conn.execute("SELECT name FROM applied_migrations ORDER BY version")]
         conn.close()
 
-        self.assertEqual(int(schema_version["value"]), 4)
+        self.assertEqual(int(schema_version["value"]), 5)
         self.assertIn("001_init.sql", applied)
         self.assertIn("002_reliability_core.sql", applied)
         self.assertIn("003_engagement_rewards.sql", applied)
         self.assertIn("004_player_views.sql", applied)
+        self.assertIn("005_npc_full_stat_blocks.sql", applied)
 
     def test_01_turn_diff_required_categories(self):
         run_dmctl("turn", "begin", "--campaign", self.campaign_id)
