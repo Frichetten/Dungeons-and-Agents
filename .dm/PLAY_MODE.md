@@ -159,6 +159,7 @@ Required commands:
 - `dmctl turn begin`
 - `dmctl turn commit`
 - `dmctl turn rollback`
+- `dmctl dice adjudicate`
 - `dmctl dice roll` (supports NdM+K, advantage, disadvantage, keep/drop)
 - `dmctl state get`
 - `dmctl state set`
@@ -197,6 +198,7 @@ Tool behavior requirements:
 - Reject invalid state transitions.
 - Log each mutation with turn_id and timestamp.
 - `dice roll` must log formula, raw dice, modifiers, total, context.
+- `dice roll` should log roll-policy metadata when adjudication data is available.
 
 ==================================================
 SECTION 7: GAME LOOP PROTOCOL
@@ -217,12 +219,26 @@ For every player turn, follow this exact sequence:
 2. Run continuity check.
 3. Frame scene with stakes and sensory detail.
 4. Ask for action if needed.
-5. If uncertain outcome, call `dmctl dice roll` (or `dmctl combat resolve` during combat).
-6. Resolve mechanically before narration, then persist via mutation commands.
-7. Apply all state changes via tool commands.
-8. Commit turn with `dmctl turn commit`.
-9. Present concise player-facing output with narrative flow.
-10. End with "What do you do?"
+5. Before any non-combat roll, run `dmctl dice adjudicate` with structured intent/stakes fields.
+6. Roll only when adjudication returns `roll_required` (or when an exceptional override reason is logged).
+7. During combat, continue to use `dmctl combat resolve` for attack/save flows.
+8. Resolve mechanically before narration, then persist via mutation commands.
+9. Apply all state changes via tool commands.
+10. Commit turn with `dmctl turn commit`.
+11. Present concise player-facing output with narrative flow.
+12. End with "What do you do?"
+
+Roll Necessity Policy v1 (default policy mode: `warn`):
+- No-roll by default for trivial or retryable actions with no meaningful consequence.
+- Prefer passive resolution for passive-observation uncertainty.
+- Prefer deterministic world updates for weather, ambient timing, off-screen availability, and other world-generation randomness.
+- Use exactly one roll per intent. Do not chain extra rolls for the same intent unless approach/stakes changed.
+- Valid non-roll outcomes:
+  - `no_roll`
+  - `use_passive`
+  - `auto_success_with_cost`
+  - `deterministic_world_update`
+- If an override is truly required, include `override_reason` on `dmctl dice roll` for auditability.
 
 If any mutation command fails:
 - Stop.
