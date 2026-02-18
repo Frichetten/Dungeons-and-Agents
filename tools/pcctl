@@ -1,0 +1,160 @@
+#!/usr/bin/env python3
+"""pcctl: player-safe wrapper around dmctl player commands."""
+
+from __future__ import annotations
+
+import argparse
+import json
+import subprocess
+import sys
+from pathlib import Path
+from typing import Any, Dict, List, Optional, Sequence
+
+ROOT = Path(__file__).resolve().parent.parent
+DMCTL_PATH = ROOT / "tools" / "dmctl"
+
+PLAYER_ACTION_ALIASES = {
+    "sheet": "sheet",
+    "items": "items",
+    "inventory": "items",
+    "locations": "locations",
+    "map": "locations",
+    "rumors": "rumors",
+    "quests": "quests",
+    "time": "time",
+}
+BLOCKED_ACTIONS = {
+    "refresh",
+    "savepoint",
+    "undo_last_turn",
+    "state",
+    "dashboard",
+}
+FORBIDDEN_FLAGS = {
+    "--profile",
+    "--include-hidden",
+    "--full",
+    "--path",
+}
+
+
+def emit_success(command: str, data: Dict[str, Any]) -> int:
+    response = {
+        "ok": True,
+        "command": command,
+        "data": data,
+        "warnings": [],
+    }
+    print(json.dumps(response, separators=(",", ":"), ensure_ascii=True))
+    return 0
+
+
+def emit_failure(command: str, error: str, details: Optional[Dict[str, Any]] = None) -> int:
+    response = {
+        "ok": False,
+        "command": command,
+        "error": error,
+        "details": details or {},
+    }
+    print(json.dumps(response, separators=(",", ":"), ensure_ascii=True))
+    return 1
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(add_help=False)
+    parser.add_argument("action", nargs="?")
+    parser.add_argument("--campaign")
+    parser.add_argument("--pc-id")
+    parser.add_argument("--limit", type=int)
+    parser.add_argument("--payload")
+    parser.add_argument("-h", "--help", action="store_true")
+    return parser
+
+
+def normalize_player_action(action: Optional[str]) -> Optional[str]:
+    return PLAYER_ACTION_ALIASES.get(str(action or "").strip().lower())
+
+
+def main(argv: Optional[Sequence[str]] = None) -> int:
+    raw_args = list(argv) if argv is not None else list(sys.argv[1:])
+    parser = build_parser()
+    args, unknown = parser.parse_known_args(raw_args)
+
+    if args.help or not args.action:
+        return emit_success(
+            "pcctl help",
+            {
+                "usage": "pcctl <sheet|items|inventory|locations|map|rumors|quests|time> [options]",
+                "options": ["--campaign", "--pc-id", "--limit", "--payload"],
+                "blocked_commands": sorted(BLOCKED_ACTIONS),
+                "blocked_flags": sorted(FORBIDDEN_FLAGS),
+            },
+        )
+
+    blocked_flags = sorted(
+        {
+            token.split("=", 1)[0]
+            for token in raw_args
+            if token.startswith("-") and token.split("=", 1)[0] in FORBIDDEN_FLAGS
+        }
+    )
+    if blocked_flags:
+        return emit_failure(
+            f"pcctl {args.action}",
+            "forbidden_player_option",
+            {"blocked": blocked_flags},
+        )
+
+    if unknown:
+        return emit_failure(
+            f"pcctl {args.action}",
+            "unknown_option",
+            {"unknown": unknown},
+        )
+
+    normalized_action = normalize_player_action(args.action)
+    raw_action = str(args.action).strip().lower()
+    if raw_action in BLOCKED_ACTIONS:
+        return emit_failure(
+            f"pcctl {args.action}",
+            "player_command_blocked",
+            {"action": raw_action, "allowed": sorted(PLAYER_ACTION_ALIASES.keys())},
+        )
+    if normalized_action is None:
+        return emit_failure(
+            f"pcctl {args.action}",
+            "unknown_player_command",
+            {"action": raw_action, "allowed": sorted(PLAYER_ACTION_ALIASES.keys())},
+        )
+
+    cmd: List[str] = [str(DMCTL_PATH), "player", normalized_action]
+    if args.campaign:
+        cmd.extend(["--campaign", args.campaign])
+    if args.pc_id:
+        cmd.extend(["--pc-id", args.pc_id])
+    if args.limit is not None:
+        cmd.extend(["--limit", str(args.limit)])
+    if args.payload:
+        cmd.extend(["--payload", args.payload])
+
+    result = subprocess.run(
+        cmd,
+        capture_output=True,
+        text=True,
+        cwd=str(ROOT),
+        check=False,
+    )
+
+    if result.stdout.strip():
+        print(result.stdout.strip())
+        return result.returncode
+
+    return emit_failure(
+        f"pcctl {args.action}",
+        "player_proxy_failed",
+        {"returncode": result.returncode, "stderr": result.stderr.strip()},
+    )
+
+
+if __name__ == "__main__":
+    sys.exit(main())

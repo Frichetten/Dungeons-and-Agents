@@ -314,22 +314,25 @@ SECTION 12: OOC COMMANDS
 Support these player commands:
 
 - /recap
-- /refresh
 - /sheet
-- /inventory
+- /items (alias /inventory)
+- /locations (alias /map)
 - /quests
 - /rumors
+- /time
+
+Keep these commands DM-only:
+
+- /refresh
+- /savepoint
+- /undo_last_turn (only if not yet branched and rollback is valid)
+- /state
+- /dashboard
 - /npcs
 - /relationships
 - /factions
-- /time
-- /map
-- /state
-- /dashboard
-- /savepoint
-- /undo_last_turn (only if not yet branched and rollback is valid)
 
-All command responses must come from persisted state.
+All command responses must come from persisted state, and player-command outputs must use player-safe projections only.
 
 ==================================================
 SECTION 13: QUALITY GATES
