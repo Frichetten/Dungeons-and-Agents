@@ -71,6 +71,8 @@ ENTITY_ID_TABLES = {
     "faction": "factions",
     "location": "locations",
 }
+DEFAULT_PC_MAX_HP = 10
+DEFAULT_NPC_MAX_HP = 10
 
 
 class DMError(Exception):
@@ -586,6 +588,32 @@ def safe_int(value: Any, field: str) -> int:
         return int(value)
     except (TypeError, ValueError) as exc:
         raise DMError("invalid_integer", {"field": field, "value": value}) from exc
+
+
+def normalize_hp_state(
+    payload: Dict[str, Any],
+    *,
+    default_max_hp: int,
+    max_hp_field: str = "max_hp",
+    current_hp_field: str = "current_hp",
+) -> Tuple[int, int]:
+    raw_max_hp = payload.get(max_hp_field)
+    max_hp = safe_int(raw_max_hp, max_hp_field) if raw_max_hp is not None else default_max_hp
+
+    raw_current_hp = payload.get(current_hp_field)
+    current_hp = safe_int(raw_current_hp, current_hp_field) if raw_current_hp is not None else max_hp
+
+    if max_hp <= 0 or current_hp < 0 or current_hp > max_hp:
+        raise DMError(
+            "invalid_hp_bounds",
+            {
+                "max_hp": max_hp,
+                "current_hp": current_hp,
+                "required": {"max_hp_min": 1, "current_hp_min": 0, "current_hp_max": "max_hp"},
+            },
+        )
+
+    return max_hp, current_hp
 
 
 def safe_bool(value: Any, field: str, default: Optional[bool] = None) -> bool:
@@ -2984,6 +3012,7 @@ def command_campaign_seed(args: argparse.Namespace, payload: Dict[str, Any]) -> 
         if not isinstance(npc, dict) or "name" not in npc:
             raise DMError("invalid_npc_payload", {"required": ["name"]})
         npc_id = npc.get("id") or uuid_id("npc")
+        max_hp, current_hp = normalize_hp_state(npc, default_max_hp=DEFAULT_NPC_MAX_HP)
         location_id = ensure_location(
             conn,
             campaign_id,
@@ -3024,8 +3053,8 @@ def command_campaign_seed(args: argparse.Namespace, payload: Dict[str, Any]) -> 
                 str(npc.get("title", "")),
                 npc.get("faction_id"),
                 location_id,
-                safe_int(npc.get("max_hp", 1), "max_hp"),
-                safe_int(npc.get("current_hp", npc.get("max_hp", 1)), "current_hp"),
+                max_hp,
+                current_hp,
                 safe_int(npc.get("ac", 10), "ac"),
                 json.dumps(npc.get("conditions", []), separators=(",", ":")),
                 safe_int(npc.get("trust", 0), "trust"),
@@ -3748,6 +3777,8 @@ def upsert_player_character(conn: sqlite3.Connection, campaign_id: str, pc: Dict
     if "id" not in pc or "name" not in pc:
         raise DMError("invalid_player_character", {"required": ["id", "name"]})
 
+    max_hp, current_hp = normalize_hp_state(pc, default_max_hp=DEFAULT_PC_MAX_HP)
+
     ts = now_iso()
     location_id = ensure_location(
         conn,
@@ -3769,8 +3800,8 @@ def upsert_player_character(conn: sqlite3.Connection, campaign_id: str, pc: Dict
         "name": str(pc["name"]),
         "char_class": str(pc.get("char_class", pc.get("class", ""))),
         "level": safe_int(pc.get("level", 1), "level"),
-        "max_hp": safe_int(pc.get("max_hp", 1), "max_hp"),
-        "current_hp": safe_int(pc.get("current_hp", pc.get("max_hp", 1)), "current_hp"),
+        "max_hp": max_hp,
+        "current_hp": current_hp,
         "ac": safe_int(pc.get("ac", 10), "ac"),
         "conditions_json": json.dumps(pc.get("conditions", []), separators=(",", ":")),
         "exhaustion": safe_int(pc.get("exhaustion", 0), "exhaustion"),
@@ -4009,6 +4040,8 @@ def command_npc_create(args: argparse.Namespace, payload: Dict[str, Any]) -> Tup
     if not name:
         raise DMError("npc_name_required", {})
 
+    max_hp, current_hp = normalize_hp_state(payload, default_max_hp=DEFAULT_NPC_MAX_HP)
+
     conn = connect_campaign_db(campaign_id)
     turn = require_open_turn(conn, campaign_id)
     turn_id = safe_int(turn["id"], "turn_id")
@@ -4058,8 +4091,8 @@ def command_npc_create(args: argparse.Namespace, payload: Dict[str, Any]) -> Tup
             str(payload.get("title", "")),
             faction_id,
             location_id,
-            safe_int(payload.get("max_hp", 1), "max_hp"),
-            safe_int(payload.get("current_hp", payload.get("max_hp", 1)), "current_hp"),
+            max_hp,
+            current_hp,
             safe_int(payload.get("ac", 10), "ac"),
             json.dumps(payload.get("conditions", []), separators=(",", ":")),
             safe_int(payload.get("trust", 0), "trust"),
@@ -8567,6 +8600,7 @@ def error_hint(error: str) -> Optional[str]:
         "invalid_relationship_type": "Relationship endpoint types must be one of: pc, npc, faction, location.",
         "invalid_entity_type": "Entity type must be one of: pc, npc, faction, location.",
         "invalid_travel_pc_ids": "Use pc_ids as an array of non-empty player IDs.",
+        "invalid_hp_bounds": "Set max_hp above 0 and current_hp between 0 and max_hp.",
     }
     return hints.get(error)
 
@@ -8598,6 +8632,7 @@ def error_message(error: str) -> str:
         "invalid_relationship_type": "Relationship type value is invalid.",
         "invalid_entity_type": "Entity type value is invalid.",
         "invalid_travel_pc_ids": "Travel pc_ids value is invalid.",
+        "invalid_hp_bounds": "Current HP must be between zero and max HP.",
     }
     return mapping.get(error, error.replace("_", " "))
 

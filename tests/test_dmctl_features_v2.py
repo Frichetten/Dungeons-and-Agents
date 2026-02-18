@@ -793,6 +793,43 @@ class TestDMCTLFeaturesV2(unittest.TestCase):
 
         run_dmctl("turn", "commit", "--campaign", self.campaign_id, "--summary", "Agenda clock step 3 no-op")
 
+    def test_19_campaign_seed_npc_defaults_are_combat_ready(self):
+        run_dmctl("turn", "begin", "--campaign", self.campaign_id)
+        run_dmctl(
+            "campaign",
+            "seed",
+            "--campaign",
+            self.campaign_id,
+            payload={
+                "npcs": [
+                    {
+                        "id": "npc_seed_default",
+                        "name": "Companion Default Seed",
+                        "location_id": "loc_start",
+                    }
+                ]
+            },
+        )
+        run_dmctl("turn", "commit", "--campaign", self.campaign_id, "--summary", "Seed npc defaults")
+
+        npcs = run_dmctl("state", "get", "--campaign", self.campaign_id, "--path", "npcs")["data"]["value"]
+        npc = next(row for row in npcs if row["id"] == "npc_seed_default")
+        self.assertEqual(npc["max_hp"], 10)
+        self.assertEqual(npc["current_hp"], 10)
+
+    def test_20_npc_create_defaults_are_combat_ready(self):
+        run_dmctl("turn", "begin", "--campaign", self.campaign_id)
+        created = run_dmctl(
+            "npc",
+            "create",
+            "--campaign",
+            self.campaign_id,
+            payload={"id": "npc_create_default", "name": "Companion Default Create", "location_id": "loc_start"},
+        )
+        self.assertEqual(created["data"]["npc"]["max_hp"], 10)
+        self.assertEqual(created["data"]["npc"]["current_hp"], 10)
+        run_dmctl("turn", "commit", "--campaign", self.campaign_id, "--summary", "Create npc defaults")
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
