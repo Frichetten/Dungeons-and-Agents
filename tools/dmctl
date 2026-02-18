@@ -2824,7 +2824,9 @@ def normalize_roll_adjudication_payload(payload: Dict[str, Any]) -> Dict[str, An
         recommended_resolution = roll_policy_recommended_resolution(decision)
         adjudication_id = adjudication_id or make_roll_adjudication_id(decision)
 
-    has_adjudication = bool(decision or adjudication_id or isinstance(adjudication_raw, dict))
+    # Adjudication is only considered present when a valid decision is resolved.
+    # Empty dict payloads or malformed adjudication IDs must not satisfy strict-mode gating.
+    has_adjudication = bool(decision)
     return {
         "has_adjudication": has_adjudication,
         "adjudication_id": adjudication_id,

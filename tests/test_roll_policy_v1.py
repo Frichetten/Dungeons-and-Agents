@@ -215,6 +215,40 @@ class TestRollPolicyV1(unittest.TestCase):
         )
         self.assertIn("roll_policy_override_applied", allowed["warnings"])
 
+    def test_05a_strict_mode_blocks_empty_adjudication_payload(self):
+        self._begin_turn()
+        blocked = run_dmctl(
+            "dice",
+            "roll",
+            "--campaign",
+            self.campaign_id,
+            payload={
+                "formula": "1d20+2",
+                "context": "strict_empty_adjudication",
+                "adjudication": {},
+                "policy_mode": "strict",
+            },
+            expect_ok=False,
+        )
+        self.assertEqual(blocked["error"], "roll_adjudication_required")
+
+    def test_05b_strict_mode_blocks_malformed_adjudication_id(self):
+        self._begin_turn()
+        blocked = run_dmctl(
+            "dice",
+            "roll",
+            "--campaign",
+            self.campaign_id,
+            payload={
+                "formula": "1d20+2",
+                "context": "strict_bad_adjudication_id",
+                "adjudication_id": "bad-id",
+                "policy_mode": "strict",
+            },
+            expect_ok=False,
+        )
+        self.assertEqual(blocked["error"], "roll_adjudication_required")
+
     def test_06_combat_context_rolls_not_blocked_in_strict_mode(self):
         self._begin_turn()
         roll = run_dmctl(
